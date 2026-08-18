@@ -115,7 +115,9 @@ async def check_graph_behaviours() -> list[str]:
     builder.add_node("images", _images)
     builder.add_node("join", lambda state: {"trace": ["join"]})
     builder.add_edge(START, "plan")
-    builder.add_conditional_edges("plan", lambda state: ["weather", "images"], ["weather", "images"])
+    builder.add_conditional_edges(
+        "plan", lambda state: ["weather", "images"], ["weather", "images"]
+    )
     builder.add_edge("weather", "join")
     builder.add_edge("images", "join")
     builder.add_edge("join", END)
@@ -154,7 +156,9 @@ async def check_graph_behaviours() -> list[str]:
     # 3. checkpointer persistence across turns
     second = await app.ainvoke({"trace": ["turn-2"]}, config=config)
     if len(second["trace"]) > 5:
-        print(f"{OK} checkpointer persistence          turn 2 sees {len(second['trace'])} prior events")
+        print(
+            f"{OK} checkpointer persistence          turn 2 sees {len(second['trace'])} prior events"
+        )
     else:
         failures.append("checkpointer did not preserve state across invocations")
         print(f"{FAIL} checkpointer persistence          state lost between turns")
