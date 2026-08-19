@@ -87,11 +87,17 @@ class MockLLM(BaseLLM):
         intent = brief.get("intent", "new_city").strip()
         route = brief.get("knowledge source", "vector_store").strip()
         days = int(brief.get("forecast days", self._forecast_days) or self._forecast_days)
+        start_date = brief.get("start date", "").strip() or None
 
         tool_calls: list[dict[str, Any]] = []
 
         if WEATHER_TOOL in offered and city:
-            tool_calls.append(self._tool_call(WEATHER_TOOL, {"city": city, "days": days}))
+            weather_args: dict[str, Any] = {"city": city, "days": days}
+            if start_date:
+                # Passing the window through to the tool is what makes a follow-up
+                # a real refresh rather than a re-fetch of the same days.
+                weather_args["start_date"] = start_date
+            tool_calls.append(self._tool_call(WEATHER_TOOL, weather_args))
 
         # A follow-up asking only about dates must not re-fetch images or re-read
         # the knowledge base. That decision belongs to the planner, and the mock

@@ -142,7 +142,16 @@ class TravelResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    city: str = Field(min_length=1, description="Resolved city name the answer is about.")
+    city: str = Field(
+        default="",
+        description=(
+            "Resolved city name the answer is about. Empty means no city could be "
+            "resolved and the answer is a request for clarification - see "
+            "is_clarification. A placeholder name is deliberately not invented here, "
+            "because a confident answer about the wrong place is harder for a user to "
+            "spot than a question."
+        ),
+    )
     city_summary: str = Field(
         min_length=40,
         description="Prose summary of the city. Minimum length guards against an empty answer.",
@@ -183,6 +192,11 @@ class TravelResponse(BaseModel):
             Only the well-formed URLs.
         """
         return [url for url in value if url.startswith(("http://", "https://"))]
+
+    @property
+    def is_clarification(self) -> bool:
+        """Whether this is a request for a city rather than an answer about one."""
+        return not self.city
 
     @property
     def is_degraded(self) -> bool:

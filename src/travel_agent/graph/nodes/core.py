@@ -24,6 +24,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from travel_agent.graph import edges as graph_edges
 from travel_agent.logging_setup import Timer, get_logger
 from travel_agent.schemas.intent import DateRange, IntentDecision, RouteDecision
 from travel_agent.schemas.response import TravelResponse
@@ -53,6 +54,13 @@ _NEXT_WEEK = re.compile(r"\bnext\s+week\b", re.IGNORECASE)
 _THIS_WEEKEND = re.compile(r"\b(this\s+)?weekend\b", re.IGNORECASE)
 _IN_N_DAYS = re.compile(r"\bin\s+(\d{1,2})\s+days?\b", re.IGNORECASE)
 _TOMORROW = re.compile(r"\btomorrow\b", re.IGNORECASE)
+
+# "about Kyoto", "in New York", "visiting Osaka" - the grammar names the
+# destination far more reliably than capitalisation does.
+_PREPOSITION_CITY = re.compile(
+    r"\b(?:about|in|for|to|visit|visiting|go\s+to|travelling\s+to|traveling\s+to)\s+"
+    r"(?P<city>[A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+)*)"
+)
 
 # Words that look like city names but are not, so the extractor does not resolve
 # "Tell" or "What" as a destination.
@@ -85,6 +93,17 @@ _NON_CITY_WORDS = frozenset(
         "images",
         "photos",
         "city",
+        "now",
+        "then",
+        "also",
+        "okay",
+        "hey",
+        "thanks",
+        "some",
+        "any",
+        "good",
+        "best",
+        "should",
         "trip",
         "travel",
         "visit",
@@ -227,6 +246,7 @@ def _extract_city(query: str, retriever: KnowledgeRetriever | None) -> str | Non
     if not query.strip():
         return None
 
+    # 1. The gazetteer. A known city is a certainty, so it outranks any guess.
     if retriever is not None:
         # Longest windows first so "New York" beats "New".
         words = re.findall(r"[A-Za-z][A-Za-z'-]*", query)
@@ -237,17 +257,49 @@ def _extract_city(query: str, retriever: KnowledgeRetriever | None) -> str | Non
                 if match:
                     return match
 
-    # An unknown city: take capitalised words that are not sentence filler.
-    tokens = re.findall(r"\b([A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+)*)\b", query)
-    for token in tokens:
-        if token.lower() not in _NON_CITY_WORDS and len(token) > 2:
-            return token
+    # 2. A preposition names its object. "Now tell me about Kyoto" has two
+    #    capitalised-ish candidates, and only the grammar says which one is the
+    #    destination - an earlier version took the first non-filler token and
+    #    confidently resolved the city as "Now".
+    prepositional = _PREPOSITION_CITY.search(query)
+    if prepositional:
+        candidate = prepositional.group("city").strip()
+        if _is_plausible_city(candidate):
+            return candidate
 
-    # Last resort: "about <city>" / "in <city>" in an all-lowercase query.
+    # 3. Capitalised phrases, preferring one that is not the first word of the
+    #    sentence - an opening word is capitalised by convention, not by meaning.
+    tokens = [
+        (match.group(1), match.start())
+        for match in re.finditer(r"\b([A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+)*)\b", query)
+    ]
+    plausible = [(token, start) for token, start in tokens if _is_plausible_city(token)]
+    non_leading = [token for token, start in plausible if start > 0]
+    if non_leading:
+        return non_leading[0]
+    if plausible:
+        return plausible[0][0]
+
+    # 4. Last resort: a preposition in an all-lowercase query.
     tail = re.search(r"\b(?:about|in|for|to)\s+([a-z][a-z'-]{2,})\b", query, re.IGNORECASE)
-    if tail and tail.group(1).lower() not in _NON_CITY_WORDS:
+    if tail and _is_plausible_city(tail.group(1)):
         return tail.group(1).title()
     return None
+
+
+def _is_plausible_city(candidate: str) -> bool:
+    """Reject sentence filler that happens to be capitalised.
+
+    Args:
+        candidate: A candidate city name.
+
+    Returns:
+        ``True`` when the candidate could be a place name.
+    """
+    cleaned = candidate.strip()
+    if len(cleaned) < 3:
+        return False
+    return all(word.lower() not in _NON_CITY_WORDS for word in cleaned.split())
 
 
 def _extract_date_range(query: str, previous: DateRange) -> tuple[DateRange, bool]:
@@ -333,6 +385,11 @@ def make_plan_tools(llm: BaseLLM, router: KnowledgeRouter | None) -> Any:
                 f"Knowledge source: {'web_search' if decision.route == 'web' else 'vector_store'}\n"
                 f"Forecast days: {date_range.days}\n"
                 f"Date window: {date_range.label}\n"
+                # The start date must reach the tool, not just the label. Without
+                # it a follow-up asking about "next week" refreshes the forecast
+                # for today all over again - the window moves in the prose and
+                # nowhere in the data.
+                f"Start date: {date_range.start.isoformat()}\n"
             )
             messages = [
                 SystemMessage(
@@ -349,12 +406,22 @@ def make_plan_tools(llm: BaseLLM, router: KnowledgeRouter | None) -> Any:
             call = await llm.plan(messages, schemas)
 
         requested = [entry.get("name") for entry in getattr(call.message, "tool_calls", [])]
+
+        # Which branches this turn will NOT run, and what that is worth. The
+        # durations come from the last full turn, so the figure is a measurement
+        # of work genuinely avoided rather than an estimate.
+        provisional = {**state, "intent": intent, "route": decision.route}
+        skipped = graph_edges.skipped_branches(provisional)
+        previous_durations = state.get("last_branch_durations", {}) or {}
+        saved_ms = sum(previous_durations.get(node, 0.0) for node in skipped)
+
         logger.info(
-            "plan_tools: route=%s (%s, score=%.3f) tools=%s",
+            "plan_tools: route=%s (%s, score=%.3f) tools=%s skipped=%s",
             decision.route,
             decision.match_reason,
             decision.score,
             requested or "none",
+            skipped or "none",
         )
 
         return {
@@ -368,6 +435,8 @@ def make_plan_tools(llm: BaseLLM, router: KnowledgeRouter | None) -> Any:
             "route_all_scores": decision.all_scores,
             "token_usage": call.usage,
             "timings": {"plan_tools": timer.elapsed_ms},
+            "skipped_nodes": skipped,
+            "skipped_ms_saved": round(saved_ms, 1),
             # Recorded here, read by the join node: the difference between this
             # and the join's own clock is the fan-out's wall time.
             "fanout_started_at": time.perf_counter(),
@@ -386,9 +455,26 @@ def make_plan_tools(llm: BaseLLM, router: KnowledgeRouter | None) -> Any:
                         "all_scores": {k: round(v, 4) for k, v in decision.all_scores.items()},
                         "tools_offered": tool_names,
                         "tools_requested": requested,
+                        "skipped_nodes": skipped,
+                        "skipped_ms_saved": round(saved_ms, 1),
                     },
                 )
-            ],
+            ]
+            + (
+                [
+                    TraceEvent(
+                        node="plan_tools",
+                        kind="skip",
+                        message=(
+                            f"skipped {', '.join(skipped)} - unchanged since the last turn"
+                            + (f", saving about {saved_ms:.0f} ms" if saved_ms else "")
+                        ),
+                        data={"skipped": skipped, "ms_saved": round(saved_ms, 1)},
+                    )
+                ]
+                if skipped
+                else []
+            ),
         }
 
     return plan_tools
@@ -530,6 +616,9 @@ async def join(state: TravelState) -> dict[str, Any]:
 
     return {
         "parallel_metrics": metrics,
+        # Persisted deliberately across turns (not reset by new_turn_updates) so a
+        # follow-up can report how much time skipping these branches saved.
+        "last_branch_durations": {k: round(v, 1) for k, v in branch_durations.items()},
         "trace": [
             TraceEvent(
                 node="join",
@@ -562,6 +651,9 @@ async def synthesize(state: TravelState) -> dict[str, Any]:
         A partial state update carrying the response object.
     """
     with Timer() as timer:
+        if state.get("intent") == "clarify":
+            return _clarify_response(state, timer)
+
         city = state.get("city") or "Unknown"
         knowledge = state.get("knowledge") or []
         weather = state.get("weather")
@@ -603,6 +695,47 @@ async def synthesize(state: TravelState) -> dict[str, Any]:
                 ),
                 duration_ms=timer.elapsed_ms,
                 data={"degraded": response.is_degraded},
+            )
+        ],
+    }
+
+
+def _clarify_response(state: TravelState, timer: Timer) -> dict[str, Any]:
+    """Build the response for a turn that named no city.
+
+    The guarded failure mode: a fresh thread asking "what about next week?" has no
+    city in memory and no city in the question. Guessing one would be worse than
+    asking - a confident answer about the wrong place is harder for a user to
+    detect than a question.
+
+    Args:
+        state: Current graph state.
+        timer: The synthesis timer, already running.
+
+    Returns:
+        A partial state update carrying a clarifying response.
+    """
+    query = state.get("user_query", "")
+    response = TravelResponse(
+        city="",
+        city_summary=(
+            "I could not tell which city you mean. This looks like a follow-up, but "
+            "there is no earlier city in this conversation to carry forward. Name a "
+            "city - for example 'Tell me about Tokyo' - and I will look it up."
+        ),
+        knowledge_source="memory",
+        warnings=["No city could be resolved from this turn or from the conversation history."],
+    )
+
+    return {
+        "response": response,
+        "timings": {"synthesize": timer.elapsed_ms},
+        "trace": [
+            TraceEvent(
+                node="synthesize",
+                kind="skip",
+                message="no city resolved - asked the user to clarify instead of guessing",
+                data={"query": query},
             )
         ],
     }

@@ -154,6 +154,12 @@ class TravelState(TypedDict, total=False):
     # half of the parallelism claim.
     fanout_started_at: float
 
+    # Branch durations from the last full turn. Deliberately NOT reset between
+    # turns: a follow-up needs them to report how much time skipping those
+    # branches actually saved.
+    last_branch_durations: Annotated[dict[str, float], merge_timings]
+    skipped_ms_saved: float
+
     # --- fan-out results (single writer each, reducer keeps prior turns) -----
     knowledge: Annotated[list[KnowledgeChunk] | None, replace_value]
     weather: Annotated[WeatherPayload | None, replace_value]
@@ -195,6 +201,7 @@ def new_turn_updates(user_query: str, turn_index: int) -> dict[str, Any]:
         "cache_hits": None,
         "timings": None,
         "token_usage": None,
+        "skipped_ms_saved": 0.0,
     }
 
 

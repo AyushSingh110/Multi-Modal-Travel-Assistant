@@ -3,10 +3,10 @@
 A working record of how this project was built, written so I can explain any part
 of it out loud without re-reading the code.
 
-> **Status:** build steps 1-10 complete (environment, foundations, schemas,
-> services, seed corpus, vector store, layered router, tool layer, manual tool
-> executor, graph assembly, parallel fan-out). The checkpointer, the UI and the
-> docs are still to come. Sections marked *(pending)* fill in as those land.
+> **Status:** build steps 1-11 complete - all three distinction challenges are
+> implemented and tested. The Streamlit UI, the model-backed synthesizer and the
+> documentation are still to come. Sections marked *(pending)* fill in as those
+> land.
 
 ---
 
@@ -438,6 +438,74 @@ with `unexpected EOF while looking for matching quote`, mid-file.
 
 **Fix.** Switched to writing files directly rather than piping them through the
 shell. Not an application bug, but it cost real time, so it is recorded here.
+
+---
+
+### 6.9 An empty error message that would have looked like a rendering bug
+
+**Symptom.** With the weather tool forced to time out, the UI warning would have
+read:
+
+    weather unavailable:
+
+Nothing after the colon.
+
+**Cause.** `asyncio.TimeoutError` carries no message. `str(exc)` is the empty
+string, so the warning was formatted from nothing at all.
+
+**Fix.** Every tool failure now gets a human-readable description, synthesised
+from the exception type and the configured timeout when the exception itself has
+nothing to say: `TimeoutError after 12s`.
+
+**Why it matters more than it looks.** A user seeing "weather unavailable:" does
+not conclude "the weather provider timed out". They conclude the app is broken -
+a truncated string looks like a rendering fault, not a network condition. The
+degradation path was working perfectly and still communicated the wrong thing.
+
+**The lesson, which is the transferable part:** *assert on what the user actually
+sees, not just that something happened.* The test that caught this checked the
+**content** of the warning; a test asserting only `response.warnings` was
+non-empty would have passed happily and shipped the bug.
+
+### 6.10 A patch that silently did not apply
+
+**Symptom.** I added edge labels to the graph diagram, regenerated it, and the
+output had no labels.
+
+**Cause.** I had edited the exporter with a script that did a string replacement
+and printed "patched" unconditionally. The anchor text had shifted - ruff had
+removed an unused import from that file earlier - so the replacement matched
+nothing and the script cheerfully reported success.
+
+**Fix.** Every patch script now asserts its anchor was found and exits non-zero
+otherwise. The same mistake recurred once more, in a script written to fix this
+very problem, which is a fair indication of how easy it is to make.
+
+**The honest process note:** I changed a file, assumed the edit applied, and it
+had not. The only reason I caught it was reading the output rather than trusting
+the exit code. Verification has to be on the *artifact*, not on the tool that
+produced it - which is the same lesson as 6.9, one level up.
+
+### 6.11 The city resolved as "Now"
+
+**Symptom.** In a three-turn demo run, the query "Now tell me about Kyoto"
+resolved the city as **"Now"**, routed it to web search, and produced a complete,
+confident answer about a city that does not exist.
+
+**Cause.** The extractor tried the gazetteer, then fell back to "the first
+capitalised word that is not sentence filler". "Now" is capitalised at the start
+of a sentence and was not in my filler list.
+
+**Fix.** Read the grammar instead of the capitalisation. A preposition names its
+object, so "about Kyoto" / "in Osaka" / "to Lisbon" is checked first, and the
+capitalised-word fallback now prefers a candidate that is *not* the opening word
+of the sentence, because an initial capital carries no information.
+
+**Why this one was worth chasing.** It is a *silent* failure: nothing raises, the
+graph runs perfectly, every tool succeeds, and the user gets a beautifully
+rendered answer about the wrong place. It was found by running the demo script
+end to end and reading the output, not by any test - which is why the fix arrived
+with eight regression tests covering the phrasings a panel is likely to type.
 
 ---
 
@@ -934,7 +1002,150 @@ an untidy 1.70x, and the untidiness is what makes it look like a measurement.
 
 ---
 
-## 11. Requirement traceability *(in progress)*
+## 11. Step 11 - Distinction 3: memory and the follow-up
+
+### 11.1 What a checkpointer is, in plain English
+
+After every superstep, LangGraph hands the current state to a **checkpointer**,
+which saves it under a **thread id**. When a later request arrives on the same
+thread id, the graph resumes from that saved state instead of starting empty.
+
+That is the entire memory system. There is no separate conversation store and no
+summarisation step: the typed state *is* the memory, and the checkpointer is
+where it lives between turns. When turn two asks "what about next week?", the
+city is not re-derived from the text - it is simply still there.
+
+**What `thread_id` scopes** is one conversation. Two browser tabs with different
+thread ids are two conversations that cannot see each other's cities or results.
+A test asserts a follow-up on an unseen thread finds nothing to borrow.
+
+### 11.2 Why re-running and discarding would be cheating
+
+This is the easiest of the three distinctions to fake. A graph could re-run every
+branch on the follow-up, throw away the images it just fetched, and produce
+user-visible behaviour identical to a graph that genuinely skipped them. The
+answer would look the same. The API bill would not.
+
+So the implementation makes the skip a property of the **topology**, and the
+evidence auditable:
+
+* `planned_branches(state)` returns what runs; `skipped_branches(state)` returns
+  what does not. The fan-out edge dispatches the first list, the planning node
+  reports the second, and a test asserts they are complementary - no branch can
+  fall through the gap or appear in both.
+* `timings` is reset at the start of every turn, so its keys are a precise record
+  of what executed *this* turn. The test asserts `execute_images` and
+  `retrieve_vector` are **absent** from turn two. A re-run-and-discard
+  implementation would still have their keys and would fail.
+* `skipped_nodes` and `skipped_ms_saved` are written into state, so the UI can
+  show what was skipped and what it was worth.
+
+### 11.3 What skipping actually buys, measured honestly
+
+The tempting claim is "the follow-up is much faster". Measuring it made clear
+that overstates the case. Three consecutive turn-1/turn-2 pairs:
+
+| Turn 1 | Turn 2 | Wall-clock saved | Provider work avoided |
+|---|---|---|---|
+| 1279 ms | 835 ms | 444 ms | 1258 ms |
+| 1219 ms | 822 ms | 397 ms | 1210 ms |
+| 1093 ms | 1044 ms | 49 ms | 1082 ms |
+
+**Mean wall clock saved: ~296 ms. Mean provider work avoided: ~1184 ms.**
+
+The gap between those two numbers is the interesting part, and it follows
+directly from Distinction 2. The skipped branches were running *concurrently*
+with the weather branch on turn one, so removing them barely shortens the turn -
+it still costs whatever the weather branch costs. What is genuinely saved is
+**work**: an entire image-provider round-trip and a knowledge read whose results
+would have been thrown away, plus the quota and money they cost against a live
+API, and one fewer tool call for the model to plan.
+
+So the honest framing, and the one I would give a panel: *parallelism buys
+latency; skipping buys cost.* They are different wins, and the second is the one
+that scales - at a thousand users, avoiding a redundant image fetch on every
+follow-up matters far more than 300 ms.
+
+The tests assert accordingly: the strong assertion is on work avoided, and the
+weak one is only that the follow-up is not somehow *slower* than the turn that
+did strictly more. An earlier version asserted a 15% wall-clock improvement and
+was both flaky and dishonest.
+
+### 11.4 The guarded failure: a follow-up with no history
+
+A fresh thread asking "what about next week?" has no city in the question and
+none in memory. The graph routes to `clarify` and answers with a question rather
+than guessing.
+
+Guessing would be strictly worse. A confident, complete answer about a city the
+user never mentioned is harder to detect than a request for clarification - the
+page looks entirely normal. The response object leaves `city` **empty** rather
+than inventing a placeholder, and exposes `is_clarification` so the UI can render
+it as a prompt rather than an answer.
+
+### 11.5 MemorySaver versus SQLite, and a verified detail
+
+`MemorySaver` is the default: no setup, fast, and adequate for a demo. Its
+limitation is worth saying out loud rather than hiding - **it dies with the
+process**. Restart the app and every conversation is gone.
+
+`CHECKPOINTER=sqlite` swaps in a durable file-backed saver. The test that proves
+this is real closes the first graph, its checkpointer and its database connection
+entirely, builds a second graph from scratch, and asserts the follow-up still
+resolves the city. Only the file on disk connects them, which is what
+distinguishes genuine persistence from a process-local dictionary that happens to
+survive two calls in one test.
+
+One detail I verified rather than assumed: **the synchronous `SqliteSaver` cannot
+be used here.** This graph runs through `ainvoke`, and the sync saver raises
+`NotImplementedError: The SqliteSaver does not support async methods` on the first
+checkpoint write. `AsyncSqliteSaver` is the one that works, and because its
+`from_conn_string` is an async *context manager*, the connection is owned by the
+checkpointer module so the saver can outlive a single `async with` block.
+
+A related bug the tests caught: the directory creation for the database sat
+*outside* the try block, so an unusable path crashed start-up instead of degrading
+to the in-memory saver. Losing durability is survivable; failing to start is not.
+
+### 11.6 The three-turn demo, end to end
+
+```
+TURN 1  "Tell me about Tokyo"        1062 ms   intent=new_city
+        ran: classify_intent, plan_tools, retrieve_vector,
+             execute_weather, execute_images, synthesize
+
+TURN 2  "what about next week?"       984 ms   intent=weather_only
+        ran     : classify_intent, plan_tools, execute_weather, synthesize
+        skipped : retrieve_vector, execute_images  (1041 ms of work avoided)
+        city    : Tokyo, carried from checkpointed state
+        forecast: 2026-08-19 -> 2026-08-26   (the window actually moved)
+        images  : preserved from turn 1, not re-fetched
+
+TURN 3  "Now tell me about Kyoto"    1220 ms   intent=new_city
+        ran: classify_intent, plan_tools, web_search,
+             execute_weather, execute_images, synthesize
+        route: web (similarity 0.040, below the 0.07 threshold)
+```
+
+Turn three is also the turn that exposed the "Now" bug in section 6.11 - the
+first version of that run resolved the city as "Now" and routed *that* to the web.
+
+### 11.7 One thing that surprised me
+
+The follow-up refreshed the forecast for **the same seven days**. The intent was
+classified correctly, the date range moved, the label said "next week" - and the
+weather tool was still called without a start date, because the planning brief
+passed the *label* to the model but not the date itself. The window moved in the
+prose and nowhere in the data.
+
+It was caught by the one test that compared the actual first forecast date across
+turns rather than trusting the label. The lesson is the same one as 6.9 from a
+different angle: the thing to assert on is the data the user ends up seeing, not
+the metadata that describes it.
+
+---
+
+## 12. Requirement traceability *(in progress)*
 
 | Assignment requirement | Where it lives | One-line explanation |
 |---|---|---|
@@ -943,7 +1154,7 @@ an untidy 1.70x, and the untidiness is what makes it look like a measurement.
 | Structured output object | `src/travel_agent/schemas/response.py` | `TravelResponse` with `city_summary`, `weather_forecast`, `image_urls`. |
 | Manual tool execution (Distinction 1) | `graph/nodes/tool_executor.py` | Hand-parses `tool_calls`, validates against the Pydantic schema, dispatches, and returns `ToolMessage` with matching ids and `status="error"` on failure. No prebuilt helpers - enforced by a test. |
 | Parallel fan-out (Distinction 2) | `graph/edges.py::route_and_fan_out`, `graph/nodes/core.py::join` | A conditional edge returns a list of node names, so all branches run in one superstep. Measured mean speed-up 2.03x. |
-| Checkpointer + follow-up (Distinction 3) | `graph/builder.py`, `graph/nodes/classify_intent.py` | *(pending)* |
+| Checkpointer + follow-up (Distinction 3) | `graph/checkpointer.py`, `graph/edges.py::planned_branches` | MemorySaver by default, AsyncSqliteSaver when durable; a follow-up re-runs only the weather branch and records what it skipped. |
 | Conditional edge on knowledge availability | `services/router.py`, `graph/edges.py` | Layered decision: gazetteer, then centroid similarity against the threshold. *(edge wiring pending)* |
 | Web search path for unknown cities | `tools/search/{mock,live}.py` | Mock plus DuckDuckGo and Tavily implementations. |
 | Weather tool, 5-7 day forecast | `tools/weather/{mock,live}.py` | Climate-plausible mock; OpenWeatherMap live. |
@@ -954,7 +1165,7 @@ an untidy 1.70x, and the untidiness is what makes it look like a measurement.
 
 ---
 
-## 12. Things I deliberately did not do *(running list)*
+## 13. Things I deliberately did not do *(running list)*
 
 * **No `sentence-transformers` by default** - the download and cold start are not
   worth it for a three-city corpus. The interface supports it.
@@ -969,4 +1180,4 @@ an untidy 1.70x, and the untidiness is what makes it look like a measurement.
 
 ---
 
-## 13. Interview Q&A *(pending - written once the UI lands)*
+## 14. Interview Q&A *(pending - written once the UI lands)*

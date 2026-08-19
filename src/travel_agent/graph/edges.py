@@ -70,6 +70,48 @@ def route_after_intent(state: TravelState) -> str:
     return PLAN_TOOLS
 
 
+def planned_branches(state: TravelState) -> list[str]:
+    """Return the branches this turn should run.
+
+    Extracted so the fan-out edge and the planning node cannot disagree. The edge
+    dispatches whatever this returns; the node reports everything it *omits* as a
+    skip, which is what makes the saving auditable rather than asserted.
+
+    Args:
+        state: Current graph state.
+
+    Returns:
+        Node names to execute, in dispatch order.
+    """
+    intent = state.get("intent", "new_city")
+    route = state.get("route", "vector")
+
+    if intent == "weather_only":
+        # The follow-up path. The city has not changed, so its summary and images
+        # are already in state from the previous turn - re-fetching them would
+        # cost latency and quota to produce byte-identical results.
+        return [EXECUTE_WEATHER]
+
+    knowledge_branch = WEB_SEARCH if route == "web" else RETRIEVE_VECTOR
+    return [knowledge_branch, EXECUTE_WEATHER, EXECUTE_IMAGES]
+
+
+def skipped_branches(state: TravelState) -> list[str]:
+    """Return the branches this turn deliberately does not run.
+
+    Args:
+        state: Current graph state.
+
+    Returns:
+        Node names that a full turn would have executed but this turn skips.
+    """
+    route = state.get("route", "vector")
+    knowledge_branch = WEB_SEARCH if route == "web" else RETRIEVE_VECTOR
+    full_turn = [knowledge_branch, EXECUTE_WEATHER, EXECUTE_IMAGES]
+    running = set(planned_branches(state))
+    return [node for node in full_turn if node not in running]
+
+
 def route_and_fan_out(state: TravelState) -> list[str]:
     """Choose the knowledge branch and dispatch every branch at once.
 
@@ -88,19 +130,12 @@ def route_and_fan_out(state: TravelState) -> list[str]:
         The node names to run concurrently. Never empty - an empty list would
         strand the graph with no path to the join node.
     """
-    intent = state.get("intent", "new_city")
-    route = state.get("route", "vector")
+    targets = planned_branches(state)
 
-    if intent == "weather_only":
-        # The follow-up path: the city has not changed, so its summary and images
-        # are already in state. Only the forecast needs refreshing.
-        logger.info("fan-out: weather only (follow-up turn)")
-        return [EXECUTE_WEATHER]
-
-    knowledge_branch = WEB_SEARCH if route == "web" else RETRIEVE_VECTOR
-    targets = [knowledge_branch, EXECUTE_WEATHER, EXECUTE_IMAGES]
-
-    logger.info("fan-out: %s dispatched in one superstep", ", ".join(targets))
+    if len(targets) == 1:
+        logger.info("fan-out: %s only (follow-up turn, other branches skipped)", targets[0])
+    else:
+        logger.info("fan-out: %s dispatched in one superstep", ", ".join(targets))
     return targets
 
 
@@ -113,6 +148,8 @@ __all__ = [
     "RETRIEVE_VECTOR",
     "SYNTHESIZE",
     "WEB_SEARCH",
+    "planned_branches",
     "route_after_intent",
     "route_and_fan_out",
+    "skipped_branches",
 ]
