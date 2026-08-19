@@ -1,16 +1,4 @@
-"""Capture screenshots of the running app for the README.
-
-    python scripts/capture_screenshots.py
-
-Starts the Streamlit app on a spare port with the mock providers forced, drives
-it with a headless browser, and writes PNGs to ``docs/screenshots/``.
-
-Mock providers are forced deliberately: the screenshots should be reproducible
-and must not depend on a reviewer's API keys or spend the author's quota.
-"""
-
 from __future__ import annotations
-
 import argparse
 import os
 import shutil

@@ -1,19 +1,4 @@
-"""Build the vector store from the seed corpus of city facts.
-
-Run once before starting the app::
-
-    python scripts/seed_vectorstore.py            # build if needed
-    python scripts/seed_vectorstore.py --force    # always rebuild
-    python scripts/seed_vectorstore.py --backend numpy
-
-The script is idempotent: it fingerprints the corpus and skips the rebuild when
-the store on disk already matches, so putting it in a start-up script costs
-nothing.
-
-It also prints a similarity matrix. That output is not decoration - it is the
-evidence that retrieval separates the three seeded cities from everything else,
-and it is where the router threshold comes from.
-"""
+"""Build the vector store from the seed corpus of city facts."""
 
 from __future__ import annotations
 

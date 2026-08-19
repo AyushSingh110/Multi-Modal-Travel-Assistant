@@ -1,14 +1,4 @@
-"""Tests for the Streamlit bridge - Risk R2.
-
-The failure mode this guards against is not a crash. It is a *hang*: a coroutine
-submitted to a loop that is no longer running never returns, and the UI freezes
-with no error anywhere. So these tests check the loop survives everything a
-Streamlit session throws at it - reruns, thread switches, and exceptions raised
-inside graph nodes.
-
-Every test here uses a timeout, because a hang would otherwise stall the suite
-rather than fail it.
-"""
+"""Tests for the Streamlit bridge - Risk R2."""
 
 from __future__ import annotations
 

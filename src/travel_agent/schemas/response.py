@@ -1,14 +1,4 @@
-"""Pydantic models describing the agent's final answer.
-
-The assignment requires the last node of the graph to emit a *structured object*
-rather than markdown, containing ``city_summary``, ``weather_forecast`` and
-``image_urls``. :class:`TravelResponse` is that object, and it is the only thing
-the Streamlit UI is allowed to render from.
-
-Keeping the contract in one place has a practical payoff: the UI never guesses
-whether a field exists, and a malformed model answer is caught here (with a
-useful error message) instead of surfacing as a blank panel.
-"""
+"""Pydantic models describing the agent's final answer."""
 
 from __future__ import annotations
 
@@ -141,7 +131,6 @@ class TravelResponse(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid")
-
     city: str = Field(
         default="",
         description=(

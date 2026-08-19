@@ -1,10 +1,4 @@
-"""Tests for tool argument schemas and their JSON-schema export.
-
-The round-trip test is the important one. It walks the exact path a real tool
-call takes - schema advertised to the model, model replies with a JSON payload,
-payload validated back into typed arguments - and asserts nothing is lost or
-silently coerced along the way.
-"""
+"""Tests for tool argument schemas and their JSON-schema export."""
 
 from __future__ import annotations
 

@@ -1,14 +1,4 @@
-"""Tests for the checkpointer and the follow-up partial update - Distinction 3.
-
-The claim is that a follow-up like "what about next week?" re-runs *only* the
-weather branch. That is the easiest of the three distinctions to fake - a graph
-could re-run everything and quietly discard the result, and the user-visible
-behaviour would be identical.
-
-So these tests do not check the answer. They check which nodes executed, how long
-the turn took, and that state genuinely crossed a process boundary when the
-durable backend is used.
-"""
+"""Tests for the checkpointer and the follow-up partial update - Distinction 3."""
 
 from __future__ import annotations
 

@@ -1,9 +1,4 @@
-"""Observability models: trace events, token accounting and tool errors.
-
-These power the live "agent trace" panel in the UI. The panel is the fastest way
-for a reviewer to see *what the graph actually did* on a request - which route it
-picked and why, which tools fired, how long each node took, what was skipped.
-"""
+"""Observability models: trace events, token accounting and tool errors."""
 
 from __future__ import annotations
 

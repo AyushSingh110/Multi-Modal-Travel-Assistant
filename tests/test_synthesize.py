@@ -1,11 +1,4 @@
-"""Tests for the synthesis node - assignment section 2.C.
-
-Grounding gets more attention here than prose quality, and deliberately so. The
-"Now tell me about Kyoto" bug produced a complete, confident, well-written answer
-about a city that does not exist. Nothing raised, every tool succeeded. The only
-defence against that class of failure is refusing to write anything the retrieved
-context does not support - so that is what these tests check.
-"""
+"""Tests for the synthesis node - assignment section 2.C."""
 
 from __future__ import annotations
 

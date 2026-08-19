@@ -1,10 +1,4 @@
-"""Tests for graph assembly and the parallel fan-out - Distinction 2.
-
-The parallelism claim is proved by measurement, not assertion: the fan-out is run
-against providers with known latencies and the superstep's wall-clock time is
-compared against the sum of the branch durations. A companion test removes a
-reducer and shows the graph refuses to run, which is *why* the reducers exist.
-"""
+"""Tests for graph assembly and the parallel fan-out - Distinction 2."""
 
 from __future__ import annotations
 

@@ -34,7 +34,9 @@ class OpenAILLM(LangChainLLM):
         try:
             from langchain_openai import ChatOpenAI
         except ImportError as exc:  # pragma: no cover - pinned dependency
-            raise ConfigurationError(f"langchain-openai is not installed: {exc}") from exc
+            raise ConfigurationError(
+                f"langchain-openai could not be imported - it is missing, or its version does not match langchain-core: {exc}"
+            ) from exc
 
         client = ChatOpenAI(
             model=resolved.openai_model,

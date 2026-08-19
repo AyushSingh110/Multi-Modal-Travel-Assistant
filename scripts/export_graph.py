@@ -1,24 +1,5 @@
-"""Export the graph topology to graph.png and graph.mmd.
-
-    python scripts/export_graph.py            # generate if missing
-    python scripts/export_graph.py --force    # always regenerate
-    python scripts/export_graph.py --print    # also print the mermaid source
-
-``graph.png`` is a required submission artifact, so both files are **committed to
-the repository**. That is deliberate, and it is a correction of an earlier
-assumption: LangGraph's ``draw_mermaid_png`` defaults to rendering through the
-mermaid.ink web service, so relying on it at review time would swap a Graphviz
-dependency for a network dependency. A reviewer with no network, or one behind a
-proxy, would clone the repo and find the diagram missing.
-
-So the file is generated once, committed, and regeneration is skipped unless
-``--force`` is passed. If the network render is unavailable the script still
-writes ``graph.mmd`` and prints an ASCII rendering, so the topology is never
-completely unavailable.
-"""
 
 from __future__ import annotations
-
 import argparse
 import sys
 from pathlib import Path

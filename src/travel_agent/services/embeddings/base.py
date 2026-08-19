@@ -13,6 +13,7 @@ WHAT AN EMBEDDING IS
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 import numpy as np
 
@@ -65,7 +66,7 @@ class BaseEmbedder(ABC):
         """
         return None
 
-    def state_dict(self) -> dict[str, object]:
+    def state_dict(self) -> dict[str, Any]:
         """Return any learned state that must be persisted alongside the index.
 
         Returns:
@@ -73,7 +74,7 @@ class BaseEmbedder(ABC):
         """
         return {}
 
-    def load_state_dict(self, state: dict[str, object]) -> None:  # noqa: ARG002 - no-op hook
+    def load_state_dict(self, state: dict[str, Any]) -> None:  # noqa: ARG002 - no-op hook
         """Restore learned state produced by :meth:`state_dict`.
 
         Args:

@@ -1,18 +1,7 @@
-"""The graph's non-tool nodes.
+"""The graph's core nodes.
 
-Each function here is one node: it receives the whole state and returns a partial
-update. Nodes that do I/O are ``async def`` coroutine *functions* - not sync
-functions returning a coroutine, which LangGraph would treat as a synchronous
-node and then reject the un-awaited coroutine as an invalid state update.
-
-Node responsibilities, in execution order:
-
-``normalize_input``   tidy the raw query and start a fresh turn
-``classify_intent``   resolve the city and date slots, decide what kind of turn
-``plan_tools``        ask the model which tools to call, and route the knowledge
-``retrieve_vector``   read the seeded corpus (the internal-knowledge branch)
-``join``              barrier after the fan-out; measures the parallel speed-up
-``synthesize``        assemble the validated response object
+Input cleaning, intent classification, tool planning, knowledge retrieval and
+the join that closes the parallel fan-out.
 """
 
 from __future__ import annotations
@@ -22,7 +11,7 @@ import time
 from datetime import date, timedelta
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
 
 from travel_agent.graph import edges as graph_edges
 from travel_agent.logging_setup import Timer, get_logger
@@ -41,7 +30,7 @@ from travel_agent.services.router import KnowledgeRouter
 
 logger = get_logger(__name__)
 
-# Branch node names, defined once so edges, timings and metrics agree.
+# Branch node names, defined once so edges, timings and metrics agree
 KNOWLEDGE_VECTOR_NODE = "retrieve_vector"
 KNOWLEDGE_WEB_NODE = "web_search"
 WEATHER_NODE = "execute_weather"
@@ -54,15 +43,12 @@ _THIS_WEEKEND = re.compile(r"\b(this\s+)?weekend\b", re.IGNORECASE)
 _IN_N_DAYS = re.compile(r"\bin\s+(\d{1,2})\s+days?\b", re.IGNORECASE)
 _TOMORROW = re.compile(r"\btomorrow\b", re.IGNORECASE)
 
-# "about Kyoto", "in New York", "visiting Osaka" - the grammar names the
-# destination far more reliably than capitalisation does.
 _PREPOSITION_CITY = re.compile(
     r"\b(?:about|in|for|to|visit|visiting|go\s+to|travelling\s+to|traveling\s+to)\s+"
     r"(?P<city>[A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+)*)"
 )
 
-# Words that look like city names but are not, so the extractor does not resolve
-# "Tell" or "What" as a destination.
+# Words that look like city names but are not
 _NON_CITY_WORDS = frozenset(
     {
         "tell",
@@ -113,15 +99,12 @@ _NON_CITY_WORDS = frozenset(
 )
 
 
-# ============================================================ normalize ======
+#  normalize
 def normalize_input(state: TravelState) -> dict[str, Any]:
-    """Clean the incoming query and reset the per-turn observability keys.
+    """Clean the user query and start a fresh turn.
 
-    Args:
-        state: Current graph state.
-
-    Returns:
-        A partial state update starting a fresh turn.
+    This is the first node, so it seeds the state with a clean slate. Every later
+    node can assume a single-line query and a correct turn index.
     """
     raw = str(state.get("user_query", "") or "")
     cleaned = re.sub(r"\s+", " ", raw).strip()
@@ -136,33 +119,12 @@ def normalize_input(state: TravelState) -> dict[str, Any]:
     }
 
 
-# ====================================================== classify intent ======
+# classify intent
 def make_classify_intent(retriever: KnowledgeRetriever | None) -> Any:
-    """Build the intent classifier node.
-
-    Slot extraction is deliberately deterministic rather than a model call. Two
-    reasons: pulling a city name out of a sentence is a parsing problem, not a
-    reasoning one, and a follow-up turn should not have to pay a model round-trip
-    to work out that the city has not changed. The model is used where it earns
-    its keep - planning tool calls and writing prose.
-
-    Args:
-        retriever: Retrieval service, used as a gazetteer for city names. May be
-            ``None`` when the store has not been seeded.
-
-    Returns:
-        An async node function.
-    """
+    """Build the intent-classification node."""
 
     async def classify_intent(state: TravelState) -> dict[str, Any]:
-        """Resolve the city and date slots and decide the kind of turn.
-
-        Args:
-            state: Current graph state.
-
-        Returns:
-            A partial state update carrying the intent and resolved slots.
-        """
+        # Classify the user's intent and extract the city and date range. This node is responsible for understanding what the user wants to do, which city they are asking about, and what date range they are interested in. It uses a combination of gazetteer lookups, regex patterns, and heuristics to extract this information from the user query.
         with Timer() as timer:
             query = str(state.get("user_query", ""))
             previous_city = state.get("city")
@@ -230,18 +192,7 @@ def make_classify_intent(retriever: KnowledgeRetriever | None) -> Any:
 
 
 def _extract_city(query: str, retriever: KnowledgeRetriever | None) -> str | None:
-    """Pull a city name out of a sentence.
-
-    Tries the gazetteer first - a known city is a certainty - then falls back to
-    capitalised words, which is how an unknown city like "Kyoto" is picked up.
-
-    Args:
-        query: The user's text.
-        retriever: Retrieval service used as a gazetteer, if available.
-
-    Returns:
-        The city name, or ``None`` when nothing usable was found.
-    """
+    # Extract a plausible city name from the user query. This function uses a combination of gazetteer lookups, regex patterns, and heuristics to identify a city name in the user's input. It prioritizes known cities from the retriever, then looks for prepositional phrases, capitalized phrases, and finally falls back to lowercase prepositions if necessary.
     if not query.strip():
         return None
 
@@ -256,18 +207,12 @@ def _extract_city(query: str, retriever: KnowledgeRetriever | None) -> str | Non
                 if match:
                     return match
 
-    # 2. A preposition names its object. "Now tell me about Kyoto" has two
-    #    capitalised-ish candidates, and only the grammar says which one is the
-    #    destination - an earlier version took the first non-filler token and
-    #    confidently resolved the city as "Now".
     prepositional = _PREPOSITION_CITY.search(query)
     if prepositional:
         candidate = prepositional.group("city").strip()
         if _is_plausible_city(candidate):
             return candidate
 
-    # 3. Capitalised phrases, preferring one that is not the first word of the
-    #    sentence - an opening word is capitalised by convention, not by meaning.
     tokens = [
         (match.group(1), match.start())
         for match in re.finditer(r"\b([A-Z][a-zA-Z'-]+(?:\s+[A-Z][a-zA-Z'-]+)*)\b", query)
@@ -279,7 +224,7 @@ def _extract_city(query: str, retriever: KnowledgeRetriever | None) -> str | Non
     if plausible:
         return plausible[0][0]
 
-    # 4. Last resort: a preposition in an all-lowercase query.
+    # Last resort: a preposition in an all-lowercase query.
     tail = re.search(r"\b(?:about|in|for|to)\s+([a-z][a-z'-]{2,})\b", query, re.IGNORECASE)
     if tail and _is_plausible_city(tail.group(1)):
         return tail.group(1).title()
@@ -287,14 +232,7 @@ def _extract_city(query: str, retriever: KnowledgeRetriever | None) -> str | Non
 
 
 def _is_plausible_city(candidate: str) -> bool:
-    """Reject sentence filler that happens to be capitalised.
-
-    Args:
-        candidate: A candidate city name.
-
-    Returns:
-        ``True`` when the candidate could be a place name.
-    """
+    # Decide whether a candidate string looks like a city name. This is a heuristic filter to avoid false positives from the regexes. It checks that the candidate is at least three characters long and does not contain any common English words that are unlikely to be city names.
     cleaned = candidate.strip()
     if len(cleaned) < 3:
         return False
@@ -302,17 +240,8 @@ def _is_plausible_city(candidate: str) -> bool:
 
 
 def _extract_date_range(query: str, previous: DateRange) -> tuple[DateRange, bool]:
-    """Work out which forecast window the turn is asking about.
-
-    Args:
-        query: The user's text.
-        previous: The window used on the previous turn.
-
-    Returns:
-        A ``(date_range, changed)`` pair.
-    """
+    # Extract a date range from the user query. This function looks for specific phrases that indicate a desired date range for the travel information. If no such phrases are found, it defaults to the previous date range or a standard "next 7 days" window.
     today = date.today()
-
     if _NEXT_WEEK.search(query):
         return DateRange(start=today + timedelta(days=7), days=7, label="next week"), True
     if _THIS_WEEKEND.search(query):
@@ -340,35 +269,12 @@ def _extract_date_range(query: str, previous: DateRange) -> tuple[DateRange, boo
     return previous, False
 
 
-# ========================================================== plan tools ======
+# plan tools
 def make_plan_tools(llm: BaseLLM, router: KnowledgeRouter | None) -> Any:
-    """Build the planning node.
-
-    This node does two things that belong together: it decides *where the facts
-    come from* (the routing decision) and then asks the model *which tools to
-    call*, offering only the tools that suit that route. Deciding the route first
-    means the web-search tool is never even advertised for a city the knowledge
-    base already covers.
-
-    Args:
-        llm: The model driver.
-        router: The knowledge router. ``None`` disables retrieval and forces the
-            web path, which is what happens when the store is unseeded.
-
-    Returns:
-        An async node function.
-    """
+    """Build the tool-planning node."""
 
     async def plan_tools(state: TravelState) -> dict[str, Any]:
-        """Route the knowledge source and ask the model for tool calls.
-
-        Args:
-            state: Current graph state.
-
-        Returns:
-            A partial state update carrying the routing decision, the model's
-            reply with its ``tool_calls`` payload, and the fan-out start time.
-        """
+        # Plan which tools to call for this turn. This node is responsible for deciding which external tools (weather, images, web search) should be invoked based on the user's intent, the resolved city, and the date range. It uses the LLM to generate a plan and ensures that all required tools are included in the final plan.
         city = state.get("city")
         intent = state.get("intent", "new_city")
         date_range = state.get("date_range") or DateRange()
@@ -384,13 +290,9 @@ def make_plan_tools(llm: BaseLLM, router: KnowledgeRouter | None) -> Any:
                 f"Knowledge source: {'web_search' if decision.route == 'web' else 'vector_store'}\n"
                 f"Forecast days: {date_range.days}\n"
                 f"Date window: {date_range.label}\n"
-                # The start date must reach the tool, not just the label. Without
-                # it a follow-up asking about "next week" refreshes the forecast
-                # for today all over again - the window moves in the prose and
-                # nowhere in the data.
                 f"Start date: {date_range.start.isoformat()}\n"
             )
-            messages = [
+            messages: list[AnyMessage] = [
                 SystemMessage(
                     content=(
                         "You are the planning step of a travel assistant. Decide which "
@@ -411,13 +313,10 @@ def make_plan_tools(llm: BaseLLM, router: KnowledgeRouter | None) -> Any:
             planned_message, added_tools = _complete_plan(
                 call.message, tool_names, city or "", date_range
             )
-
         requested = [entry.get("name") for entry in getattr(planned_message, "tool_calls", [])]
 
-        # Which branches this turn will NOT run, and what that is worth. The
-        # durations come from the last full turn, so the figure is a measurement
-        # of work genuinely avoided rather than an estimate.
-        provisional = {**state, "intent": intent, "route": decision.route}
+        # Which branches this turn will NOT run, and what that is worth.
+        provisional: TravelState = {**state, "intent": intent, "route": decision.route}
         skipped = graph_edges.skipped_branches(provisional)
         previous_durations = state.get("last_branch_durations", {}) or {}
         saved_ms = sum(previous_durations.get(node, 0.0) for node in skipped)
@@ -430,7 +329,6 @@ def make_plan_tools(llm: BaseLLM, router: KnowledgeRouter | None) -> Any:
             requested or "none",
             skipped or "none",
         )
-
         return {
             "messages": [planned_message],
             "route": decision.route,
@@ -444,8 +342,6 @@ def make_plan_tools(llm: BaseLLM, router: KnowledgeRouter | None) -> Any:
             "timings": {"plan_tools": timer.elapsed_ms},
             "skipped_nodes": skipped,
             "skipped_ms_saved": round(saved_ms, 1),
-            # Recorded here, read by the join node: the difference between this
-            # and the join's own clock is the fan-out's wall time.
             "fanout_started_at": time.perf_counter(),
             "trace": [
                 TraceEvent(
@@ -494,35 +390,7 @@ def _complete_plan(
     city: str,
     date_range: DateRange,
 ) -> tuple[AIMessage, list[str]]:
-    """Add any offered tool the model failed to request.
-
-    WHY THIS EXISTS
-        A live run against Groq revealed a real divergence from the mock: asked
-        about Tokyo with both the weather and image tools offered, the model
-        called only the weather tool. The gallery came back empty. Strengthening
-        the prompt did not change it.
-
-        The interface has a fixed contract - a summary, a gallery and a chart -
-        so an answer missing its images is incomplete regardless of what the
-        planner decided. The model chooses *arguments* and *routing*; whether the
-        page needs pictures is not really its judgement call. So the graph fills
-        in what the planner omitted, records it in the trace, and carries on.
-
-        The trade-off, stated plainly: this makes the planner advisory for tool
-        *selection* rather than authoritative. That is the right split here
-        because the required set is known up front. If the tool set were open
-        ended, this would be the wrong design and the prompt would have to carry
-        the weight.
-
-    Args:
-        message: The model's reply, carrying whatever it asked for.
-        offered: Tool names that were advertised this turn.
-        city: The resolved city, used for the synthesised arguments.
-        date_range: The forecast window, used for the synthesised arguments.
-
-    Returns:
-        A tuple of the message to store and the names of any tools added.
-    """
+    # Ensure that all required tools are present in the model's plan. If the model omitted any tools, this function adds them with default arguments based on the resolved city and date range. It returns a new AIMessage with the complete list of tool calls and a list of any tools that were added by the graph.
     existing = list(getattr(message, "tool_calls", []) or [])
     requested = {entry.get("name") for entry in existing}
     missing = [name for name in offered if name not in requested]
@@ -562,16 +430,7 @@ def _complete_plan(
 
 
 def _route(router: KnowledgeRouter | None, city: str | None) -> RouteDecision:
-    """Ask the router where this city's facts should come from.
-
-    Args:
-        router: The knowledge router, or ``None`` when retrieval is unavailable.
-        city: The resolved city.
-
-    Returns:
-        A routing decision. With no router the web path is chosen, and the reason
-        says so rather than pretending a score was computed.
-    """
+    # Decide which knowledge source to use for this turn. If a router is provided, it uses the router to decide between the vector store and web search based on the resolved city. If no router is available, it defaults to web search as the only source.
     if router is None:
         return RouteDecision(
             route="web",
@@ -584,15 +443,7 @@ def _route(router: KnowledgeRouter | None, city: str | None) -> RouteDecision:
 
 
 def _tools_for(decision: RouteDecision, intent: str) -> list[str]:
-    """Choose which tools to advertise for this turn.
-
-    Args:
-        decision: The routing decision.
-        intent: The classified intent.
-
-    Returns:
-        Tool names to offer the model.
-    """
+    # Determine which tools to call based on the routing decision and user intent. The weather tool is always included, and the image tool is included unless the intent is "weather_only". If the routing decision indicates that web search should be used, the web search tool is also included.
     if intent == "weather_only":
         return [WEATHER_TOOL]
 
@@ -602,30 +453,12 @@ def _tools_for(decision: RouteDecision, intent: str) -> list[str]:
     return tools
 
 
-# ===================================================== retrieve vector ======
+# retrieve vector
 def make_retrieve_vector(retriever: KnowledgeRetriever | None) -> Any:
-    """Build the internal-knowledge branch node.
-
-    Args:
-        retriever: Retrieval service, or ``None`` when the store is unseeded.
-
-    Returns:
-        An async node function.
-    """
+    """Build the vector-retrieval node."""
 
     async def retrieve_vector(state: TravelState) -> dict[str, Any]:
-        """Read the seeded corpus for the resolved city.
-
-        Unlike the weather and image branches this is not a tool call: it is an
-        internal database read, so it does not go through the model's tool
-        protocol at all.
-
-        Args:
-            state: Current graph state.
-
-        Returns:
-            A partial state update carrying the retrieved chunks.
-        """
+        # Retrieve knowledge chunks from the vector store for the resolved city. This node is responsible for fetching relevant information from the vector store based on the city identified in the user's query. If no retriever is available, it returns an empty list of chunks.
         city = state.get("city") or ""
 
         with Timer() as timer:
@@ -649,27 +482,12 @@ def make_retrieve_vector(retriever: KnowledgeRetriever | None) -> Any:
     return retrieve_vector
 
 
-# ================================================================= join =====
+# join
 async def join(state: TravelState) -> dict[str, Any]:
-    """Barrier after the fan-out; measures what the parallelism actually bought.
+    """Join the parallel branches and report the timing metrics.
 
-    LangGraph schedules every branch in one superstep and only runs this node once
-    all of them have finished. That makes it the right place to compare two
-    numbers:
-
-    * **sequential equivalent** - the sum of the branches' own durations, which is
-      what the same work would have cost run one after another;
-    * **parallel wall clock** - how long the superstep actually took, measured
-      from the moment ``plan_tools`` finished.
-
-    The ratio is the speed-up, and it is stored in state so the UI and the README
-    quote a measured figure rather than a claim.
-
-    Args:
-        state: Current graph state.
-
-    Returns:
-        A partial state update carrying the parallel metrics.
+    Collects what the concurrent branches produced, then records wall-clock time,
+    sequential-equivalent time and the resulting speed-up.
     """
     started = state.get("fanout_started_at")
     wall_clock_ms = (time.perf_counter() - float(started)) * 1000.0 if started else 0.0
@@ -716,7 +534,7 @@ async def join(state: TravelState) -> dict[str, Any]:
     }
 
 
-# =========================================================== synthesize =====
+# synthesize
 
 __all__ = [
     "FAN_OUT_NODES",

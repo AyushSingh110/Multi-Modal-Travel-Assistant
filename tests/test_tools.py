@@ -1,9 +1,4 @@
-"""Tests for the tool layer: providers, failure injection, retry and degradation.
-
-The failure-mode tests matter as much as the happy path. The rubric asks whether
-the app survives a dead weather API, and the answer has to be demonstrable, not
-asserted - so every failure shape the demo toggle can produce is exercised here.
-"""
+"""Tests for the tool layer: providers, failure injection, retry and degradation."""
 
 from __future__ import annotations
 

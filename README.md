@@ -1,13 +1,14 @@
 # Multi-Modal Travel Assistant
 
-A LangGraph agent that answers questions about a city with a written summary, a
-photo gallery and a weather chart. It decides for itself whether the facts should
-come from its own knowledge base or from a live web search, fetches weather and
-images concurrently rather than one after the other, and remembers the
-conversation so a follow-up like "what about next week?" refreshes only the
-forecast. Every external service sits behind an interface with a live and a mock
-implementation, so **the whole application runs end to end with no API keys at
-all**.
+Ask about a city. You get a short write-up, a set of photos, and a weather chart.
+
+The app decides for itself where the facts come from: its own small database, or
+a web search. It asks for the weather and the photos at the same time, so the
+answer comes faster. It remembers the conversation, so "what about next week?"
+only fetches the new weather.
+
+Every outside service has a real version and a fake one, so **the whole app runs
+without any API key**.
 
 ```bash
 conda env create -f environment.yml && conda activate travel-agent
@@ -15,8 +16,15 @@ python scripts/seed_vectorstore.py
 streamlit run src/travel_agent/ui/app.py
 ```
 
-Full setup, including the Windows variants, is in [RUN_COMMANDS.md](RUN_COMMANDS.md).
-The reasoning behind every decision is in [ENGINEERING_JOURNAL.md](ENGINEERING_JOURNAL.md).
+Full setup is in [RUN_COMMANDS.md](RUN_COMMANDS.md).
+
+**Model: Groq is the default.** OpenAI and Anthropic are both built and tested
+too - switching is one line in `.env` (`LLM_PROVIDER=anthropic`). Groq is the
+default because the free allowance on the other two does not cover a day of
+building plus a live demo, and a demo that dies on a quota error is the worst
+outcome. Groq returns a real `tool_calls` payload, so the hand-written tool
+runner is still tested against the real thing. With no keys at all, a mock model
+takes over and sends real `tool_calls` payloads of its own.
 
 ---
 
@@ -24,16 +32,15 @@ The reasoning behind every decision is in [ENGINEERING_JOURNAL.md](ENGINEERING_J
 
 ![The assistant answering a question about Tokyo](docs/screenshots/02-in-store-city.png)
 
-The right-hand **agent trace** panel is the important part: it shows what the
-graph decided and the measurements behind each decision, so the internal
-behaviour is visible rather than described.
+The **agent trace** panel on the right is the important part. It shows what the
+app decided and the numbers behind each choice.
 
 | | |
 |---|---|
 | ![Routing decision](docs/screenshots/04-trace-routing.png) | ![Parallel measurement](docs/screenshots/03-trace-parallelism.png) |
-| **Routing** - the score, the threshold, and every city's similarity | **Parallelism** - sequential-equivalent against actual wall clock |
+| **Routing** - the score, the limit, and how close every city is | **Parallelism** - time if done one by one, against real time |
 | ![Follow-up skipping](docs/screenshots/05-follow-up-skipped.png) | ![Graceful degradation](docs/screenshots/07-weather-api-broken.png) |
-| **Memory** - which branches a follow-up skipped, and what that saved | **Degradation** - the weather API broken on demand; the page survives |
+| **Memory** - what a follow-up skipped, and what that saved | **Degradation** - weather broken on purpose; the page still works |
 
 ---
 
@@ -41,233 +48,165 @@ behaviour is visible rather than described.
 
 ![The LangGraph topology](graph.png)
 
-Generated from the compiled graph by `scripts/export_graph.py` and committed, so
-it is present in a clone regardless of network access. Dashed edges are
-conditional; the labels distinguish the two that are *alternatives* from the two
-that run *concurrently*.
+Boxes are jobs, arrows say what runs next. Dashed arrows are choices made while
+the app runs. The picture is generated from the real graph by
+`scripts/export_graph.py`.
 
-| Node | What it does |
+| Box | What it does |
 |---|---|
-| `normalize_input` | Cleans the query and starts a fresh turn, clearing per-turn trace and timing keys. |
-| `classify_intent` | Resolves the city and date slots deterministically and classifies the turn as `new_city`, `weather_only`, `refine` or `clarify`. |
-| `plan_tools` | Decides the knowledge source, then asks the model which tools to call, offering only the tools that suit that route. |
-| `retrieve_vector` | Reads the seeded corpus. An internal database read, not a tool call. |
-| `web_search` | Runs the web search tool for a city the knowledge base does not cover. |
-| `execute_weather` | Manual tool executor, handling the weather call. |
-| `execute_images` | Manual tool executor, handling the image call. |
-| `join` | Barrier after the fan-out; measures the parallel speed-up. |
-| `synthesize` | Produces the validated `TravelResponse` the UI renders. |
+| `normalize_input` | Cleans the question, starts a fresh turn. |
+| `classify_intent` | Finds the city and the dates, decides what kind of question this is. |
+| `plan_tools` | Picks the fact source, then asks the model which tools to call. |
+| `retrieve_vector` | Reads the facts we stored. A database read, not a tool call. |
+| `web_search` | Searches the web, for a city we did not store. |
+| `execute_weather` | Runs the weather tool. Hand-written runner. |
+| `execute_images` | Runs the photo tool. Same runner. |
+| `join` | Waits for the parallel steps, measures the time saved. |
+| `synthesize` | Builds the final checked answer. |
 
-**Conditional edge 1 - `route_after_intent`.** Decides whether the turn needs work
-at all. A turn with no resolvable city, or one whose answer is already in state,
-goes straight to `synthesize`.
+**Choice 1 - `route_after_intent`.** Is there any work to do? No city, or an
+answer we already have, jumps straight to the end.
 
-**Conditional edge 2 - `route_and_fan_out`.** Does both jobs the assignment asks
-for. It chooses the knowledge branch (`retrieve_vector` **or** `web_search`) and
-returns a **list** of node names, which schedules the knowledge branch, the
-weather branch and the image branch into a single superstep so they execute
-concurrently.
+**Choice 2 - `route_and_fan_out`.** Picks the fact source (stored **or** web),
+then returns a *list* of box names instead of one. Returning a list is what makes
+the facts, weather and photo steps start together.
 
 ---
 
-## How each requirement is met
+## Requirements
 
-| Requirement | Where | Notes |
-|---|---|---|
-| LangGraph orchestration, clear nodes/edges/state | [`graph/builder.py`](src/travel_agent/graph/builder.py), [`graph/edges.py`](src/travel_agent/graph/edges.py) | 9 nodes, 2 conditional edges. |
-| Typed state | [`schemas/state.py`](src/travel_agent/schemas/state.py) | `TypedDict` with `Annotated` reducers on every concurrently-written key. |
-| Streamlit GUI | [`ui/app.py`](src/travel_agent/ui/app.py), [`ui/components/`](src/travel_agent/ui/components/) | Summary, gallery, Plotly chart, agent trace. |
-| OpenAI or Anthropic model | [`services/llm/openai.py`](src/travel_agent/services/llm/openai.py), [`services/llm/anthropic.py`](src/travel_agent/services/llm/anthropic.py) | Both implemented; see "Why Groq is the default" below. |
-| Vector store seeded with 3 cities | [`data/city_facts/`](data/city_facts/), [`scripts/seed_vectorstore.py`](scripts/seed_vectorstore.py) | Paris, Tokyo, New York - 27 chunks, 9 each. FAISS with an automatic NumPy fallback. |
-| Web search for cities not in the store | [`tools/search/`](src/travel_agent/tools/search/) | Mock, DuckDuckGo and Tavily implementations. |
-| **Conditional edge routing on knowledge availability** | [`services/router.py`](src/travel_agent/services/router.py) | Gazetteer first, then centroid similarity against a calibrated threshold. |
-| Structured output object | [`schemas/response.py`](src/travel_agent/schemas/response.py) | `TravelResponse` carries `city_summary`, `weather_forecast`, `image_urls`. |
-| UI parses that object to draw a line chart | [`ui/components/charts.py`](src/travel_agent/ui/components/charts.py) | Plotly, seven daily points with a shaded high/low band. |
-| Weather forecast, 5-7 days | [`tools/weather/`](src/travel_agent/tools/weather/) | Climate-plausible mock; OpenWeatherMap live. |
-| Image retrieval | [`tools/images/`](src/travel_agent/tools/images/) | Verified Wikimedia photographs; Unsplash live. |
-| Graceful error handling | [`tools/registry.py`](src/travel_agent/tools/registry.py), [`tools/retry.py`](src/travel_agent/tools/retry.py) | Timeouts, bounded retries, and a failing tool never breaks the page. |
-| `graph.png` | [`graph.png`](graph.png), [`scripts/export_graph.py`](scripts/export_graph.py) | Generated and committed. |
+| Requirement | Where |
+|---|---|
+| LangGraph, clear nodes/edges/state | [`graph/builder.py`](src/travel_agent/graph/builder.py), [`graph/edges.py`](src/travel_agent/graph/edges.py) - 9 boxes, 2 choice points |
+| Typed state | [`schemas/state.py`](src/travel_agent/schemas/state.py) - every shared value has a rule for joining |
+| Streamlit GUI | [`ui/app.py`](src/travel_agent/ui/app.py), [`ui/components/`](src/travel_agent/ui/components/) |
+| OpenAI or Anthropic model | [`services/llm/openai.py`](src/travel_agent/services/llm/openai.py), [`services/llm/anthropic.py`](src/travel_agent/services/llm/anthropic.py) - both built |
+| Vector store, 3 cities | [`data/city_facts/`](data/city_facts/), [`scripts/seed_vectorstore.py`](scripts/seed_vectorstore.py) - 27 pieces, FAISS with a NumPy backup |
+| Web search fallback | [`tools/search/`](src/travel_agent/tools/search/) - mock, DuckDuckGo, Tavily |
+| **Conditional edge on knowledge availability** | [`services/router.py`](src/travel_agent/services/router.py) - name list first, then word closeness against 0.07 |
+| Structured output | [`schemas/response.py`](src/travel_agent/schemas/response.py) - `city_summary`, `weather_forecast`, `image_urls` |
+| Line chart from that object | [`ui/components/charts.py`](src/travel_agent/ui/components/charts.py) - Plotly, shaded high/low band |
+| Weather, 5-7 days | [`tools/weather/`](src/travel_agent/tools/weather/) - mock, or OpenWeatherMap live |
+| Images | [`tools/images/`](src/travel_agent/tools/images/) - Wikimedia photos, or Unsplash live |
+| Graceful errors | [`tools/registry.py`](src/travel_agent/tools/registry.py), [`tools/retry.py`](src/travel_agent/tools/retry.py) - one broken tool never breaks the page |
+| `graph.png` | [`graph.png`](graph.png), [`scripts/export_graph.py`](scripts/export_graph.py) |
 
-**327 tests, all passing with no API keys configured.**
-
-```bash
-pytest -q     # 327 passed
-```
+**327 tests, all passing with no API keys** (`pytest -q`).
 
 ---
 
-## The three distinctions, with measured evidence
+## The three distinctions
 
 ### 1. Manual tool execution
 
-[`graph/nodes/tool_executor.py`](src/travel_agent/graph/nodes/tool_executor.py)
-reads `state["messages"][-1].tool_calls` directly. For each call it resolves the
-name in the registry, validates the arguments against that tool's Pydantic
-schema, dispatches it, and returns a `ToolMessage` carrying the matching
-`tool_call_id`. Calls run under `asyncio.gather` so one failing tool never aborts
-its siblings.
+[`tool_executor.py`](src/travel_agent/graph/nodes/tool_executor.py) reads
+`state["messages"][-1].tool_calls` itself, checks the arguments, runs the tool,
+and replies with a `ToolMessage` carrying the same id. Wrong id, and the model
+gets confused. Calls run together, so one broken tool does not stop the others.
+A failed tool still gets a reply, marked as an error; an unknown tool name gets
+back the list of tools that do exist.
 
-Failures come back as `ToolMessage(status="error")` with a useful body - an
-unknown tool name is answered with the list of tools that *do* exist, so the model
-can correct itself. The module opens with a plain-English explanation of the raw
-protocol and what breaks if the id pairing is wrong.
-
-**No prebuilt helpers, and that is enforced rather than promised.**
-`test_no_prebuilt_tool_calling_helpers_anywhere_in_the_source` walks every file in
-`src/` and `scripts/`, checking imports via the AST and identifiers via the
-tokeniser, and fails if `ToolNode`, `create_tool_calling_agent` or
-`create_react_agent` appear in code. It ignores comments and strings, so the
-module can discuss the decision it made without breaking the check that enforces
-it.
+No ready-made helpers, and a test proves it:
+`test_no_prebuilt_tool_calling_helpers_anywhere_in_the_source` reads every file
+in `src/` and `scripts/` and fails if `ToolNode` or the prebuilt agent builders
+appear in code. It skips comments, so we can still explain the choice.
 
 ### 2. Parallel fan-out
 
-A conditional edge returns a *list* of node names, so the knowledge, weather and
-image branches are scheduled into one superstep and run concurrently. This is a
-property of the topology, not a `gather` hidden inside a node - which is why it is
-visible in `graph.png`.
+One choice point returns a list of box names, so three steps start together. It
+is built into the shape of the graph, not hidden inside a node - which is why you
+can see it in `graph.png`.
 
-| Query | Route | Sequential-equivalent | Actual wall clock | Speed-up |
+| Query | Route | One by one | Real | Faster |
 |---|---|---|---|---|
-| Tell me about Tokyo | vector store | 1964 ms | 1157 ms | 1.70x |
-| Tell me about Paris | vector store | 2056 ms | 1276 ms | 1.61x |
-| Tell me about Kyoto | web search | 2865 ms | 1035 ms | 2.77x |
+| Tokyo | vector store | 1964 ms | 1157 ms | 1.70x |
+| Paris | vector store | 2056 ms | 1276 ms | 1.61x |
+| Kyoto | web search | 2865 ms | 1035 ms | 2.77x |
 
-**Mean 2.03x**, about 1.1 seconds saved per request. Repeated runs give a mean
-between roughly 1.9x and 2.1x - the mocks apply latency jitter, so the shape is
-stable but the exact figure is not.
+Average **2.03x**, about 1.1 seconds saved. You wait for the slowest step, not
+for all of them added up - so on the stored path the real race is weather against
+photos, and that sets the limit.
 
-**What bounds it:** concurrent work costs the slowest branch, not the sum. On the
-vector-store path the local index read is effectively free, so the fan-out is
-really weather against images and the ceiling is the slower of the two. The web
-path gains most because it has three genuinely slow branches.
+### 3. Memory and partial update
 
-### 3. Checkpointer and follow-up partial update
-
-`MemorySaver` by default, `AsyncSqliteSaver` when `CHECKPOINTER=sqlite`, scoped by
-`thread_id`. Ask about Tokyo, then ask "what about next week?": the city is
-resolved from checkpointed state, the date window moves, and **only the weather
-branch runs**.
+State is saved per conversation (`MemorySaver`, or `AsyncSqliteSaver` with
+`CHECKPOINTER=sqlite`), keyed by `thread_id`. Ask about Tokyo, then ask "what
+about next week?": the city comes from saved state, the dates move, and **only
+the weather step runs again**.
 
 ```
-TURN 1  "Tell me about Tokyo"      intent=new_city
-        ran: classify_intent, plan_tools, retrieve_vector,
-             execute_weather, execute_images, synthesize
-
 TURN 2  "what about next week?"    intent=weather_only
         ran     : classify_intent, plan_tools, execute_weather, synthesize
         skipped : retrieve_vector, execute_images
-        forecast: 2026-08-19 -> 2026-08-26   (the window actually moved)
-        images  : preserved from turn 1, not re-fetched
+        forecast: 2026-08-19 -> 2026-08-26   (the dates really moved)
+        images  : kept from turn 1
 ```
 
-**What that actually saves, stated honestly:** measured over three turn-pairs, a
-mean of **296 ms** off the wall clock but **1184 ms** of provider work avoided.
-Those diverge because the skipped branches previously ran *concurrently* with the
-weather branch, so removing them barely shortens the turn. The real saving is an
-image round-trip and a knowledge read that would have been discarded, plus the
-quota they cost. **Parallelism buys latency; skipping buys cost** - and the second
-is the one that scales.
+Honestly measured: this saves **296 ms** of waiting but avoids **1184 ms** of
+outside work. The two differ because the skipped steps used to run *alongside*
+the weather step. The real saving is a photo request and a database read we would
+have thrown away, plus their quota. **Running steps together saves time; skipping
+saves money** - and money is what grows with users.
 
-The skip is auditable, not asserted: `timings` is cleared each turn, so its keys
-are a record of what actually executed, and a test asserts `execute_images` is
-absent on turn two. A re-run-and-discard implementation would fail it.
+The skip is checkable: `timings` is cleared each turn, so what is left is a
+record of what really ran, and a test asserts `execute_images` is missing on turn
+two.
 
 ---
 
-## Architecture decisions
+## Main decisions
 
-| Decision | Why | Trade-off accepted |
+| Decision | Why |
+|---|---|
+| LangGraph, not a chain | Choosing a path, running steps together, and re-running only a part are all about shape. A chain hides them in normal code. |
+| Name list first, then word closeness | "Do we have this city?" is mostly a question about names. "NYC" would fail a closeness test outright. |
+| Limit 0.07 | Measured, not guessed. Stored cities score 0.102-0.207, unknown ones 0.000-0.040, so 0.07 sits in the gap. The seeding script prints the table. |
+| Simple word-count embeddings | The question is only "is this one of our three cities?". The alternative needs hundreds of megabytes or an API key. |
+| FAISS with a NumPy backup | FAISS suits data that grows, but a failed install must not stop the app. |
+| Ask for JSON and repair it | Works the same on all four models, and the error handling stays in code we can explain. |
+| The model writes words only | Forecasts and photo links come from tools with a fixed shape. Asking the model to repeat them only invites changes. |
+| Fake services by default | A demo that depends on someone else's API key can fail in the room. |
+
+**What this project taught me.** The suite reached 293 passing tests before the
+first live request - and that request came back with no photos. The live model
+was offered both tools and called only the weather one. No test caught it,
+because my mock always asked for both. Fake services test your code against your
+own guesses, not against reality. The fix was not a better prompt: the screen
+always needs all three parts, so the graph now fills in any tool the model forgot
+and records it as `tools_added_by_graph`.
+
+---
+
+## Demo
+
+| # | Type this | Look for |
 |---|---|---|
-| LangGraph over a chain | Conditional routing, a fan-out and a partial re-run are topology, not control flow. A chain hides all three inside application code. | More machinery, and every concurrently-written state key needs a reducer. |
-| Layered router: gazetteer, then similarity | Whether the store covers a city is usually a question about *names*, and a lookup answers it exactly. "NYC" would fail a similarity threshold outright. | The gazetteer needs maintenance as the corpus grows; the similarity path is what generalises. |
-| Threshold 0.07 | Measured, not guessed: seeded cities score 0.102-0.207, unseeded 0.000-0.040, so 0.07 sits inside a 0.062 gap. The seeder prints the matrix. | The value is corpus-specific and must be re-derived if the corpus changes. A start-up guard warns if it drifts out of range. |
-| Hashed TF-IDF embeddings by default | The retrieval question is lexical - does this name one of three cities - and the alternative costs hundreds of megabytes of PyTorch or an API key. | It does not know "the French capital" means Paris. `EMBEDDING_PROVIDER=openai` swaps in semantic embeddings. |
-| FAISS with a NumPy fallback | FAISS is the right shape for a corpus that grows; a native wheel that fails to install must not stop the app. | Two backends to keep behind one interface. Tested both ways. |
-| JSON mode + validate-and-repair, not `with_structured_output` | Works identically across all four drivers, and keeps failure handling in code I can explain. | One extra model call in the rare repair case. |
-| Model writes prose only | The forecast and image URLs are typed tool payloads; asking a model to echo them back only creates a chance to alter them. | The summary cannot reference exact numbers the tools did not provide. |
-| Mocks as the default | The assignment blesses them, and a demo depending on a reviewer's API keys is a demo that fails in the room. | Mocks can be more obedient than reality - see below. |
-
-### Why Groq is the default model
-
-**OpenAI and Anthropic are both fully implemented**, behind the same interface and
-covered by the same tests. Switching is one line in `.env`:
-
-```bash
-LLM_PROVIDER=anthropic     # or openai, or groq, or mock
-```
-
-Groq is the default demo driver for practical reasons rather than architectural
-ones. The free-tier allowance on the spec-named providers does not comfortably
-cover a day of iterative development plus a live demo, and a demo that dies on a
-quota error is worse than any design nicety. Groq's API is also OpenAI-compatible
-and returns a genuine `tool_calls` payload, so the manual executor is exercised
-against the real wire protocol; and it is fast enough that the parallel
-measurement is dominated by tool latency rather than model latency, which makes
-that number cleaner.
-
-With no keys at all the deterministic `MockLLM` takes over. It is not a stub - it
-emits real `tool_calls` payloads with unique ids, so every downstream code path is
-the one a live model exercises.
-
-### The most useful thing this project taught me
-
-The suite reached 293 passing tests before the first live request. That request
-returned a page with **no images**: the live model, offered both tools, called
-only the weather tool. No test could have caught it, because my mock always
-requested both. **Mocks verify your code against your assumptions, not against
-reality.**
-
-Strengthening the prompt did not fix it, and would have been the wrong fix anyway
-- it makes a hard contract depend on persuasion. The interface needs a summary, a
-gallery and a chart, so the required tool set is known before the model is asked
-anything, and the graph now completes any plan that omits one, recorded in the
-trace as `tools_added_by_graph`. The planner became advisory for tool *selection*
-rather than authoritative - correct when the required set is known in advance,
-wrong if the tool set were open-ended.
-
-`scripts/live_smoke_test.py` runs one live request end to end. It should have
-existed on day one rather than at the end.
+| 1 | `Tell me about Tokyo` | **Internal knowledge base**, score 0.207 against the 0.07 limit |
+| 2 | `what about next week?` | City carries over; `retrieve_vector, execute_images` **skipped**; dates move, photos do not |
+| 3 | `Tell me about Kyoto` | **Live web search** - 0.040, under the limit; links in the write-up |
+| 4 | Toggle **Break the weather API**, then `Tell me about Paris` | Write-up and photos still appear; a banner explains the failure |
 
 ---
 
-## Sixty-second demo
-
-Type these four in order. Each exercises a different path.
-
-| # | Type this | What to look for |
-|---|---|---|
-| 1 | `Tell me about Tokyo` | Trace shows **Internal knowledge base**, exact name match, similarity 0.207 against a 0.07 threshold. Gallery, chart and summary render. |
-| 2 | `what about next week?` | City carries over from memory. Memory tab shows `retrieve_vector, execute_images` **skipped**. The forecast dates move; the images do not change. |
-| 3 | `Tell me about Kyoto` | Trace shows **Live web search** - Kyoto scores 0.040, below the threshold. Summary comes from search results with source links. |
-| 4 | Toggle **Break the weather API**, then `Tell me about Paris` | Summary and gallery still render. A banner names the failure. No stack trace. |
-
-Then open the **Parallelism** tab on any answer to see the sequential-equivalent
-against the actual wall clock.
-
----
-
-## Project layout
+## Layout
 
 ```
 src/travel_agent/
-  config/          typed settings; nothing else reads the environment
-  schemas/         state with reducers, tool arguments, responses, trace events
-  services/        embeddings, vector stores, retrieval, router, LLM drivers
-  tools/           weather, images, search - each with a live and a mock provider
-  graph/           nodes, edges, builder, checkpointer, diagram export
-  ui/              Streamlit app, the async bridge, and the render components
-data/
-  city_facts/      the seed corpus, one markdown file per city
-  images/          bundled offline fallback images + ATTRIBUTION.md
-evals/             labelled queries for router accuracy
-scripts/           seeding, graph export, smoke tests, screenshots
-tests/             327 tests, no API keys required
+  config/     typed settings; nothing else reads the environment
+  schemas/    state, tool arguments, responses, trace events
+  services/   embeddings, vector stores, retrieval, router, LLM drivers
+  tools/      weather, images, search - each with a live and a mock version
+  graph/      nodes, edges, builder, checkpointer, diagram export
+  ui/         Streamlit app, the async bridge, render components
+data/         seed corpus, offline fallback images
+evals/        labelled queries for router accuracy
+scripts/      seeding, graph export, smoke tests
+tests/        327 tests, no API keys needed
 ```
 
-## Running with live providers
+## Live providers
 
-Everything defaults to mocks. Each provider switches independently:
+Each one switches on its own:
 
 ```bash
 LLM_PROVIDER=groq          GROQ_API_KEY=...
@@ -276,16 +215,11 @@ IMAGE_PROVIDER=live        UNSPLASH_ACCESS_KEY=...
 SEARCH_PROVIDER=live       # DuckDuckGo needs no key; Tavily uses TAVILY_API_KEY
 ```
 
-Verify a live provider end to end with:
-
-```bash
-python scripts/live_smoke_test.py
-```
+Check one end to end with `python scripts/live_smoke_test.py`.
 
 ## Attribution
 
-Gallery photographs come from Wikimedia Commons and are credited with their
-photographer and licence in [`data/images/ATTRIBUTION.md`](data/images/ATTRIBUTION.md),
-read from the Commons API rather than assumed. The bundled `*.png` files in that
-directory are generated placeholders used when Commons is unreachable, and carry
-no third-party rights.
+Gallery photos come from Wikimedia Commons, credited with photographer and
+licence in [`data/images/ATTRIBUTION.md`](data/images/ATTRIBUTION.md), read from
+the Commons API rather than guessed. The `*.png` files in that folder are our own
+placeholder images, used when Commons cannot be reached.

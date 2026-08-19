@@ -1,72 +1,11 @@
-"""The manual tool executor node - Distinction 1.
+"""The manual tool executor.
 
-================================================================================
-THE RAW TOOL-CALLING PROTOCOL, IN PLAIN ENGLISH
-================================================================================
+Parses the model's raw ``tool_calls``, runs each tool, and answers with a
+``ToolMessage`` carrying the matching ``tool_call_id``.
 
-A language model cannot run code. It can only produce text. So when you want a
-model to "use a tool", what actually happens is a strict, three-part exchange
-between your program and the model, and this module implements the middle part
-by hand.
-
-**Part 1 - you advertise the tools.** Before asking anything, you send the model
-a list of functions it is allowed to request, each with a name, a description,
-and a JSON schema describing its arguments. In this project those schemas are
-generated from Pydantic models in ``schemas/tools.py``.
-
-**Part 2 - the model asks.** Instead of answering in prose, the model can reply
-with a structured request. In LangChain that arrives as an ``AIMessage`` whose
-``.tool_calls`` is a list, each entry looking like::
-
-    {"id": "call_a1b2c3",              # the model's handle for THIS request
-     "name": "get_weather_forecast",   # which advertised tool it wants
-     "args": {"city": "Tokyo", "days": 7},
-     "type": "tool_call"}
-
-The model has not run anything. It has produced a request and stopped.
-
-**Part 3 - you answer, and the id is the whole game.** Your program runs the
-function and sends the result back as a ``ToolMessage``. That message MUST carry
-``tool_call_id`` set to the *exact* id from the request it answers.
-
-Why the pairing matters so much: a model can ask for several tools at once - this
-project routinely requests weather and images in the same turn - and the results
-come back as separate messages, potentially in a different order to the requests,
-because the tools ran concurrently and finished when they finished. The id is the
-only thing connecting an answer to its question. Order tells you nothing.
-
-**What breaks if you get it wrong:**
-
-* *Wrong id* - the model attributes the weather data to the image request. It
-  will then confidently describe photographs of a 7-day forecast. Nothing raises;
-  you just get nonsense.
-* *Missing ToolMessage* - most providers reject the next request outright with an
-  API error, because the conversation contains a question with no answer. OpenAI
-  and Groq both do this. It is a hard failure, mid-conversation.
-* *Reporting failure as success* - if a tool raises and you return the string
-  ``"error: timeout"`` with the default status, the model reads that as the
-  legitimate result of the call. It has no way to know the tool failed, so it
-  will summarise "the weather is error: timeout". ``ToolMessage`` has a ``status``
-  field for exactly this: setting ``status="error"`` tells the model the call did
-  not succeed, so it can apologise, retry, or work around the gap honestly.
-
-================================================================================
-WHY THIS IS WRITTEN BY HAND
-================================================================================
-
-LangGraph ships ``langgraph.prebuilt.ToolNode``, which does all of the above in
-one line. This project deliberately does not use it (and a test enforces that).
-Writing it out buys three things the prebuilt node does not give:
-
-1. **Per-tool error isolation.** One tool failing must never abort its siblings.
-   Here each call is executed independently and a failure becomes an error
-   ``ToolMessage`` while the other calls carry on.
-2. **Selective execution.** One executor instance can be told to handle only
-   *some* of the tool calls in a message. That is what lets the weather branch and
-   the image branch of the parallel fan-out share this exact code while running
-   concurrently in different graph nodes.
-3. **Observability.** Every call emits a trace event and a timing, which is what
-   the UI trace panel renders.
+LangGraph ships ``ToolNode``, which does all of this for you. We do it by
+hand so the raw tool-calling protocol is visible, and so failures come back
+as error messages the model can read instead of exceptions.
 """
 
 from __future__ import annotations
@@ -87,21 +26,12 @@ from travel_agent.tools.registry import ToolRegistry, ToolResult
 
 logger = get_logger(__name__)
 
-#: Characters of tool output handed back to the model. Enough to summarise from,
-#: bounded so a large payload cannot dominate the context window.
+# Characters of tool output handed back to the model. Enough to summarise from,bounded so a large payload cannot dominate the context window.
 MAX_TOOL_CONTENT_CHARS = 4000
 
 
 def extract_tool_calls(messages: list[AnyMessage]) -> list[dict[str, Any]]:
-    """Read the pending tool calls from the most recent AI message.
-
-    Args:
-        messages: The conversation so far.
-
-    Returns:
-        The raw ``tool_calls`` payload, or an empty list when the last message is
-        not an ``AIMessage`` or requested no tools.
-    """
+    """Return the tool calls on the last AI message, or an empty list."""
     if not messages:
         return []
 
@@ -113,18 +43,7 @@ def extract_tool_calls(messages: list[AnyMessage]) -> list[dict[str, Any]]:
 
 
 class ManualToolExecutor:
-    """Executes a model's tool calls and returns correctly paired tool messages.
-
-    One instance is created per graph node. ``handles`` is what allows the same
-    class to serve several concurrent branches: the weather branch executes only
-    the weather call, the image branch only the image call, and neither touches
-    the other's work.
-
-    Attributes:
-        registry: Where tool names are resolved and executed.
-        node_name: Name used in trace events and timings.
-        handles: Tool names this instance is responsible for, or ``None`` for all.
-    """
+    """Runs the tool calls the model asked for, without any prebuilt helper."""
 
     def __init__(
         self,
@@ -146,23 +65,11 @@ class ManualToolExecutor:
         self.handles = handles
 
     async def __call__(self, state: TravelState) -> dict[str, Any]:
-        """Execute the pending tool calls this node is responsible for.
-
-        Args:
-            state: Current graph state.
-
-        Returns:
-            A partial state update: the ``ToolMessage`` replies, any domain
-            payloads the tools produced, plus trace events, timings and error
-            records. Never raises - a failing tool becomes an error message, not
-            an exception, because the rest of the page must still render.
-        """
+        """Run this node's tool calls concurrently and return the state update."""
         tool_calls = extract_tool_calls(state.get("messages", []))
         mine = [call for call in tool_calls if self._is_mine(call)]
 
         if not mine:
-            # Not an error. On a follow-up turn the model may request only the
-            # weather tool, leaving the image branch with nothing to do.
             logger.debug("%s: no matching tool calls", self.node_name)
             return {
                 "trace": [
@@ -174,14 +81,12 @@ class ManualToolExecutor:
                 ],
                 "skipped_nodes": [self.node_name],
             }
-
         with Timer() as timer:
-            # Concurrent, and crucially independent: return_exceptions keeps one
+            # Concurrent, and independent on purpose: return_exceptions keeps one
             # unexpected failure from cancelling its siblings mid-flight.
             results = await asyncio.gather(
                 *(self._execute_one(call) for call in mine), return_exceptions=True
             )
-
         messages: list[ToolMessage] = []
         trace: list[TraceEvent] = []
         errors: list[ToolErrorRecord] = []
@@ -205,7 +110,6 @@ class ManualToolExecutor:
                     )
                 )
                 continue
-
             message, events, error, payload_updates = outcome
             messages.append(message)
             trace.extend(events)
@@ -221,19 +125,11 @@ class ManualToolExecutor:
             **updates,
         }
 
-    # ------------------------------------------------------------ one call --
+    # one call
     async def _execute_one(
         self, call: dict[str, Any]
     ) -> tuple[ToolMessage, list[TraceEvent], ToolErrorRecord | None, dict[str, Any]]:
-        """Run a single tool call and build its reply.
-
-        Args:
-            call: One entry from the model's ``tool_calls`` payload.
-
-        Returns:
-            A tuple of the ``ToolMessage`` to send back, trace events, an optional
-            error record, and any domain state updates the payload produced.
-        """
+        # Execute a single tool call and return the result, trace events, and any domain payload updates.
         name = str(call.get("name", ""))
         call_id = str(call.get("id") or "")
         raw_args = call.get("args", {})
@@ -267,7 +163,6 @@ class ManualToolExecutor:
                 },
             )
         ]
-
         if result.failed:
             return (
                 self._error_message(call, result.error or "tool failed"),
@@ -282,7 +177,6 @@ class ManualToolExecutor:
                 ),
                 {},
             )
-
         return (
             ToolMessage(
                 content=self._summarise(name, result.payload),
@@ -338,22 +232,10 @@ class ManualToolExecutor:
             status="error",
         )
 
-    # ------------------------------------------------------- payload shaping --
+    # payload shaping
     @staticmethod
     def _summarise(tool_name: str, payload: Any) -> str:
-        """Render a tool result as compact text for the model.
-
-        Full payloads are verbose - a 7-day forecast with humidity and wind is
-        several hundred tokens of JSON the model does not need. Each tool is
-        summarised down to the fields that actually inform the answer.
-
-        Args:
-            tool_name: Which tool produced the payload.
-            payload: The tool's return value.
-
-        Returns:
-            A compact JSON string, truncated to a sane length.
-        """
+        # Summarise a tool payload into a JSON string the model can read.
         if tool_name == WEATHER_TOOL and isinstance(payload, WeatherPayload):
             summary = {
                 "city": payload.city,

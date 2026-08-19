@@ -1,12 +1,4 @@
-"""Structured logging and per-node timing helpers.
-
-Two things live here:
-
-1. :func:`configure_logging` - one consistent log format for the whole app.
-2. :func:`timed` / :class:`Timer` - measure how long a node or tool took. Latency
-   is a first-class output of this project (the parallel fan-out claim is only
-   credible with numbers), so timing is instrumentation, not debug printing.
-"""
+"""Logging setup and the ``Timer`` helper used to record node durations."""
 
 from __future__ import annotations
 

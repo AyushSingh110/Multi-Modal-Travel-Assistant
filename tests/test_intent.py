@@ -1,11 +1,4 @@
-"""Tests for slot extraction: which city, which dates, which kind of turn.
-
-The city extractor is deterministic on purpose - pulling a place name out of a
-sentence is parsing, not reasoning, and a follow-up should not pay a model
-round-trip to discover the city has not changed. Deterministic also means
-testable, which matters because the failure mode here is silent: resolving the
-wrong city produces a confident, complete, entirely wrong answer.
-"""
+"""Tests for slot extraction: which city, which dates, which kind of turn."""
 
 from __future__ import annotations
 

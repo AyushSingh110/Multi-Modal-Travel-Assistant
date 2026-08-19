@@ -1,11 +1,4 @@
-"""Functional tests for the Streamlit app.
-
-Streamlit's ``AppTest`` runs the real script in-process, so these exercise the
-actual page - including the cached runtime, the async bridge and the graph -
-without a browser. What they are guarding against is the class of failure that
-only appears in the UI: an exception during a rerun, a widget that crashes when
-state is empty, or a chart handed a field that is not there.
-"""
+"""Functional tests for the Streamlit app."""
 
 from __future__ import annotations
 

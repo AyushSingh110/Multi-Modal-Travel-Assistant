@@ -1,15 +1,4 @@
-"""One live end-to-end request against the configured provider.
-
-    python scripts/live_smoke_test.py
-
-Deliberately minimal: a single query, one city, mock tools. What it proves is the
-part that only a real provider can prove - that the live model returns a genuine
-``tool_calls`` payload the manual executor can dispatch, and that its JSON reply
-survives Pydantic validation.
-
-Everything else in this project runs on mocks. This exists so the live path is
-known to work before a demo, rather than during one.
-"""
+"""One live end-to-end request against the configured provider."""
 
 from __future__ import annotations
 
@@ -21,7 +10,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
-
 from travel_agent.config.settings import get_settings  # noqa: E402
 from travel_agent.graph.builder import build_dependencies, build_graph  # noqa: E402
 from travel_agent.logging_setup import configure_logging  # noqa: E402

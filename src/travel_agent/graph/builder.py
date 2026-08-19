@@ -1,25 +1,4 @@
-"""Assembles the compiled LangGraph application.
-
-The topology, in one place::
-
-    START
-      -> normalize_input
-      -> classify_intent
-      -> (conditional) plan_tools | synthesize
-      -> plan_tools
-      -> (conditional, returns a LIST -> one superstep)
-             retrieve_vector | web_search      knowledge branch
-             execute_weather                   tool branch
-             execute_images                    tool branch
-      -> join           barrier; measures the speed-up
-      -> synthesize
-      -> END
-
-Dependencies - the model driver, the retriever, the router, the tool registry -
-are constructed once here and closed over by the nodes. Nothing reaches for a
-global, which is what lets a test build the same graph with a broken weather
-provider and assert the page still renders.
-"""
+"""Assembles the compiled LangGraph application."""
 
 from __future__ import annotations
 
@@ -171,22 +150,6 @@ def build_graph(
     compiled = builder.compile(checkpointer=checkpointer or MemorySaver())
     logger.info("graph compiled: %d nodes", len(edges.FAN_OUT_TARGETS) + 5)
     return compiled
-
-
-def build_uncompiled_graph(dependencies: GraphDependencies | None = None) -> StateGraph:
-    """Build the graph without compiling it.
-
-    Used by the diagram exporter, which only needs the topology.
-
-    Args:
-        dependencies: Pre-built dependencies.
-
-    Returns:
-        The uncompiled builder.
-    """
-    deps = dependencies or build_dependencies()
-    compiled = build_graph(deps)
-    return compiled  # type: ignore[return-value]
 
 
 __all__ = ["GraphDependencies", "build_dependencies", "build_graph"]

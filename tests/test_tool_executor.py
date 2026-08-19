@@ -1,10 +1,4 @@
-"""Tests for the manual tool executor - Distinction 1.
-
-The executor is the piece this project would be judged on hardest, so the tests
-cover the protocol itself rather than just the happy path: id pairing when
-results arrive out of order, error status fidelity, per-call isolation, and a
-mechanised guarantee that no prebuilt tool-calling helper crept back in.
-"""
+"""Tests for the manual tool executor - Distinction 1."""
 
 from __future__ import annotations
 

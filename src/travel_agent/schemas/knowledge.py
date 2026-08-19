@@ -1,9 +1,4 @@
-"""Models for retrieved knowledge.
-
-A "chunk" is one passage of text about a city, small enough to be a meaningful
-retrieval unit but large enough to stand on its own. The seed corpus is split by
-markdown section, so one chunk equals one topic (transit, food, etiquette, ...).
-"""
+"""Models for retrieved knowledge."""
 
 from __future__ import annotations
 
@@ -25,7 +20,6 @@ class KnowledgeChunk(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid")
-
     chunk_id: str
     city: str
     section: str

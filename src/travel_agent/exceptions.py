@@ -1,11 +1,4 @@
-"""Exception hierarchy for the travel assistant.
-
-Every failure raised by this package derives from :class:`TravelAgentError`, so a
-caller can catch one base class and still tell *what kind* of thing went wrong by
-the subclass. The graph relies on this: node code catches
-:class:`ToolExecutionError` to degrade gracefully (render the page without that
-tool's data) while letting genuine programming errors propagate and fail loudly.
-"""
+"""The application's exception hierarchy."""
 
 from __future__ import annotations
 

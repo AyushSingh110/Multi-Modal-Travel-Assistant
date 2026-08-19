@@ -59,7 +59,9 @@ class GroqLLM(LangChainLLM):
         try:
             from langchain_groq import ChatGroq
         except ImportError as exc:  # pragma: no cover - pinned dependency
-            raise ConfigurationError(f"langchain-groq is not installed: {exc}") from exc
+            raise ConfigurationError(
+                f"langchain-groq could not be imported - it is missing, or its version does not match langchain-core: {exc}"
+            ) from exc
 
         client = ChatGroq(
             model=self._settings.groq_model,

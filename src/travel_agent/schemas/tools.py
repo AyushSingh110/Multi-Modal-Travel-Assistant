@@ -1,24 +1,4 @@
-"""Tool argument schemas and their JSON-schema export.
-
-WHAT A TOOL CALL IS
-    Modern chat models do not execute code. When a model decides a tool is
-    needed, it returns a structured payload naming the tool and giving arguments
-    as JSON, e.g.::
-
-        {"id": "call_abc", "name": "get_weather_forecast",
-         "args": {"city": "Tokyo", "days": 7}}
-
-    The application is responsible for finding that function, running it, and
-    handing the result back. The models in this module define both halves of that
-    contract: the JSON schema advertised *to* the model, and the Pydantic model
-    used to validate what comes *back*.
-
-WHY VALIDATE AT ALL
-    The model can get arguments wrong - a missing field, a string where an int
-    belongs, or an entirely invented tool name. Validating against the same
-    schema that was advertised turns a would-be ``TypeError`` deep inside a tool
-    into a clean, reportable error the graph can hand back to the model.
-"""
+"""Tool argument schemas and their JSON-schema export."""
 
 from __future__ import annotations
 

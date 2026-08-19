@@ -1,21 +1,4 @@
-"""Annotate the generated topology diagram so the parallelism is readable.
-
-WHY ANNOTATE AT ALL
-    LangGraph renders every conditional edge the same way - a dashed arrow. That
-    is accurate but ambiguous: the four arrows leaving ``plan_tools`` include two
-    that are *alternatives* (vector store or web search, never both) and two that
-    are *concurrent* (weather and images, always together). A reviewer looking at
-    the picture cannot tell which is which, and the parallelism is the whole point
-    of Distinction 2.
-
-WHY IT CANNOT DRIFT
-    The annotation never invents structure. It takes the mermaid source generated
-    from the compiled graph and adds a label to edges it recognises, leaving
-    everything else untouched. If the topology changes, the diagram changes with
-    it, and any edge without a known label simply renders unlabelled rather than
-    wrongly. A test asserts the annotated source has exactly the same nodes and
-    edges as the compiled graph.
-"""
+"""Annotate the generated topology diagram so the parallelism is readable."""
 
 from __future__ import annotations
 

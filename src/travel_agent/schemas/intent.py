@@ -1,10 +1,4 @@
-"""Models describing what the user asked for on this turn.
-
-The follow-up distinction ("Tokyo" then "what about next week?") is really a
-*slot tracking* problem: the city slot carries over from the previous turn while
-the date slot changes. Making that explicit - rather than hiding it inside a
-prompt - is what lets the graph skip work it has already done.
-"""
+"""Models describing what the user asked for on this turn."""
 
 from __future__ import annotations
 

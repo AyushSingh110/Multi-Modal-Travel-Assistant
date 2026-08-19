@@ -1,28 +1,4 @@
-"""The typed graph state and its reducers.
-
-WHAT STATE IS
-    LangGraph runs a set of functions ("nodes") that each receive the current
-    state and return a partial update. The state is a single typed dictionary
-    that travels through the graph and is saved by the checkpointer between
-    turns.
-
-WHY REDUCERS EXIST
-    When two nodes run *concurrently* in the same step and both write the same
-    key, LangGraph does not silently pick a winner - it raises
-    ``InvalidUpdateError: Can receive only one value per step``. A reducer is a
-    function ``(existing, update) -> merged`` attached to a key via
-    ``Annotated[...]`` that tells LangGraph how to combine those writes.
-
-    This is not decoration. The parallel fan-out in this project (weather,
-    images and knowledge retrieval running at once) is only legal *because* every
-    key those branches touch carries a reducer. That is why each one below has a
-    unit test proving it merges correctly.
-
-RESET SEMANTICS
-    The accumulating reducers treat an explicit ``None`` update as "clear this
-    key". Without it there would be no way to empty a list that only ever grows,
-    and each new turn would inherit the previous turn's trace.
-"""
+"""The typed graph state and its reducers."""
 
 from __future__ import annotations
 
@@ -128,19 +104,19 @@ class TravelState(TypedDict, total=False):
     concurrently with another, carries an ``Annotated`` reducer.
     """
 
-    # --- conversation -------------------------------------------------------
+    # conversation
     messages: Annotated[list[AnyMessage], add_messages]
     user_query: str
     thread_id: str
     turn_index: int
 
-    # --- slots, preserved across turns by the checkpointer ------------------
+    # slots, preserved across turns by the checkpointer
     city: str | None
     previous_city: str | None
     date_range: DateRange
     intent: Intent
 
-    # --- routing ------------------------------------------------------------
+    # routing
     route: RouteName | None
     route_score: float | None
     route_threshold: float
@@ -160,12 +136,12 @@ class TravelState(TypedDict, total=False):
     last_branch_durations: Annotated[dict[str, float], merge_timings]
     skipped_ms_saved: float
 
-    # --- fan-out results (single writer each, reducer keeps prior turns) -----
+    # fan-out results
     knowledge: Annotated[list[KnowledgeChunk] | None, replace_value]
     weather: Annotated[WeatherPayload | None, replace_value]
     images: Annotated[list[ImageAsset] | None, replace_value]
 
-    # --- observability (written concurrently: reducers are mandatory) -------
+    # observability
     trace: Annotated[list[TraceEvent], append_list]
     errors: Annotated[list[ToolErrorRecord], append_list]
     skipped_nodes: Annotated[list[str], append_list]
@@ -174,7 +150,7 @@ class TravelState(TypedDict, total=False):
     token_usage: Annotated[TokenUsage, add_token_usage]
     parallel_metrics: Annotated[ParallelMetrics | None, replace_value]
 
-    # --- final answer -------------------------------------------------------
+    # final answer
     response: Annotated[TravelResponse | None, replace_value]
 
 

@@ -201,8 +201,8 @@ def main() -> None:
                 logger.exception("turn failed")
                 st.error(f"The request failed: {type(exc).__name__}: {exc}")
 
-    state = st.session_state.get("last_state")
-    if not state:
+    last_state: dict[str, Any] | None = st.session_state.get("last_state")
+    if not last_state:
         st.info(
             "Ask about a city, or use one of the presets above. Tokyo, Paris and "
             "New York are in the knowledge base; anything else routes to web search."
@@ -213,10 +213,10 @@ def main() -> None:
     answer_column, trace_column = st.columns([3, 2], gap="large")
 
     with answer_column:
-        render_answer(state)
+        render_answer(last_state)
 
     with trace_column:
-        render_trace_panel(state, runtime)
+        render_trace_panel(last_state, runtime)
 
 
 main()

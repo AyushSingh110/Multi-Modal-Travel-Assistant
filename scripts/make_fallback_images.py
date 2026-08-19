@@ -1,17 +1,4 @@
-"""Regenerate the bundled offline fallback images, and optionally ATTRIBUTION.md.
-
-    python scripts/make_fallback_images.py                    # images only, offline
-    python scripts/make_fallback_images.py --with-attribution # also refresh licences
-
-The images are generated placeholders, not copies of the Wikimedia photographs.
-Bundling someone else's photograph would mean shipping their licence obligations
-with the repository; these files only need to prove the gallery still lays out
-correctly when Commons is unreachable.
-
-``--with-attribution`` re-reads photographer and licence data from the Commons
-API and rewrites ``data/images/ATTRIBUTION.md``. It is rate limited, so it waits
-between requests and honours ``Retry-After``.
-"""
+"""Regenerate the bundled offline fallback images, and optionally ATTRIBUTION.md."""
 
 from __future__ import annotations
 

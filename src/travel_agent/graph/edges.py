@@ -1,22 +1,4 @@
-"""The graph's conditional edges - where the routing and the parallelism live.
-
-WHAT A CONDITIONAL EDGE IS
-    An ordinary edge always goes to the same place. A conditional edge runs a
-    function at execution time and goes wherever that function names. The two here
-    are what make this a decision-making graph rather than a fixed pipeline.
-
-WHAT A SUPERSTEP IS
-    LangGraph executes in rounds. Everything scheduled in the same round - the
-    same superstep - starts together, runs concurrently, and the next round does
-    not begin until all of it has finished. A conditional edge that returns a
-    *list* of node names schedules all of them into one superstep.
-
-    That single fact is the whole of Distinction 2. The alternative - calling
-    ``asyncio.gather`` inside one node - would also run the work concurrently, but
-    the graph would contain one node where three should be, and ``graph.png``
-    would show a straight line. Parallelism that a reviewer cannot see in the
-    topology is parallelism they have to take on faith.
-"""
+"""The graph's conditional edges - where the routing and the parallelism live."""
 
 from __future__ import annotations
 
@@ -73,9 +55,9 @@ def route_after_intent(state: TravelState) -> str:
 def planned_branches(state: TravelState) -> list[str]:
     """Return the branches this turn should run.
 
-    Extracted so the fan-out edge and the planning node cannot disagree. The edge
-    dispatches whatever this returns; the node reports everything it *omits* as a
-    skip, which is what makes the saving auditable rather than asserted.
+    Kept in one place so the fan-out edge and the planning node cannot disagree.
+    The edge runs whatever this returns; the node reports whatever it leaves out
+    as a skip. That way the skip list is a record, not a claim.
 
     Args:
         state: Current graph state.

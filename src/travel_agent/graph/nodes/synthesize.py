@@ -1,29 +1,6 @@
-"""The synthesis node: turn gathered facts into a validated response object.
+"""The final node.
 
-This is the node the assignment's section 2.C is about. It must not stream
-markdown at the UI - it must emit a structured object the interface can render
-field by field.
-
-THREE THINGS MATTER HERE, IN THIS ORDER
-    1. **Grounding.** The summary is built from the passages actually in state.
-       The model is given those passages and told to use nothing else. When the
-       context is thin the correct output is "limited information available", not
-       confident prose about a place nobody retrieved anything for. A city
-       resolved incorrectly - see the "Now tell me about Kyoto" bug - produces a
-       complete, confident, entirely wrong answer, and grounding is the only thing
-       standing between that mistake and the user.
-    2. **Validation.** Whatever the model returns is parsed and validated against
-       a Pydantic model. A failure is repaired once by handing the model its own
-       error, and if that fails the response is assembled deterministically from
-       the raw tool payloads. The user never sees a validation error.
-    3. **Honesty about gaps.** If the weather tool failed, the summary says the
-       forecast is unavailable rather than inventing one. Same for images.
-
-WHY JSON MODE RATHER THAN with_structured_output
-    Not every provider supports schema-constrained decoding, and the ones that do
-    implement it differently. JSON mode plus this project's own validate-and-repair
-    pass works identically across all four drivers, and it keeps the failure
-    handling in code I can explain rather than inside a framework helper.
+Turns tool payloads and retrieved passages into a validated ``TravelResponse``.
 """
 
 from __future__ import annotations
@@ -31,7 +8,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from travel_agent.logging_setup import Timer, get_logger
@@ -118,7 +95,7 @@ def make_synthesize(llm: BaseLLM) -> Any:
     return synthesize
 
 
-# ============================================================ the model call ==
+# the model call
 async def _draft_summary(
     llm: BaseLLM, state: TravelState
 ) -> tuple[SynthesisDraft, list[TraceEvent], Any]:
@@ -137,7 +114,10 @@ async def _draft_summary(
     prompt = _build_prompt(state, city, knowledge)
     events: list[TraceEvent] = []
 
-    messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
+    messages: list[AnyMessage] = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content=prompt),
+    ]
 
     try:
         raw, usage = await llm.complete_json(messages)
@@ -151,7 +131,6 @@ async def _draft_summary(
             )
         )
         return _deterministic_draft(city, knowledge, state), events, None
-
     draft = _validate(raw)
     if draft is not None:
         events.append(
@@ -168,7 +147,7 @@ async def _draft_summary(
     # readily when told exactly what was wrong, and one retry is the point where
     # the cost stops being worth it.
     logger.info("synthesis output failed validation; attempting one repair")
-    repair_messages = [
+    repair_messages: list[AnyMessage] = [
         *messages,
         HumanMessage(
             content=(
@@ -179,7 +158,6 @@ async def _draft_summary(
             )
         ),
     ]
-
     try:
         repaired_raw, repair_usage = await llm.complete_json(repair_messages)
         repaired = _validate(repaired_raw)
@@ -238,7 +216,7 @@ def _validate(raw: str) -> SynthesisDraft | None:
         return None
 
 
-# ================================================================ prompting ==
+# prompting
 def _build_prompt(state: TravelState, city: str, knowledge: list[KnowledgeChunk]) -> str:
     """Build the synthesis prompt from what is actually in state.
 
@@ -272,10 +250,8 @@ def _build_prompt(state: TravelState, city: str, knowledge: list[KnowledgeChunk]
             f"Weather: available, {len(weather.forecast)} days from {first.date}, "
             f"around {first.temp_min_c:.0f} to {first.temp_max_c:.0f} C, {first.condition}."
         )
-
     if not images:
         lines.append("Images: UNAVAILABLE. No photographs were retrieved.")
-
     lines.append("")
     lines.append("FACTS:")
     if knowledge:
@@ -287,15 +263,15 @@ def _build_prompt(state: TravelState, city: str, knowledge: list[KnowledgeChunk]
     return "\n".join(lines)
 
 
-# ============================================================== assembling ==
+# assembling
 def _deterministic_draft(
     city: str, knowledge: list[KnowledgeChunk], state: TravelState
 ) -> SynthesisDraft:
     """Build a summary without a model, from the retrieved passages.
 
-    The last line of defence. It is deliberately dull - whole sentences lifted
-    from the source material - because a dull true answer beats an elegant
-    fabricated one, and beats an error page outright.
+    The fallback when the model is unavailable or its answer will not validate.
+    It just lifts whole sentences from the source text. Boring, but true, and
+    better than showing an error page.
 
     Args:
         city: The resolved city.
@@ -338,7 +314,7 @@ def _carry_previous_summary(state: TravelState) -> SynthesisDraft | None:
     A follow-up that only moves the date window has not changed anything the
     summary describes. Regenerating it would cost a model call to produce
     different words for identical facts - and the wording drifting between turns
-    would look like the system had changed its mind.
+    would just look like the app had changed its mind.
 
     Args:
         state: Current graph state.
@@ -348,11 +324,9 @@ def _carry_previous_summary(state: TravelState) -> SynthesisDraft | None:
     """
     if state.get("intent") != "weather_only":
         return None
-
     previous: TravelResponse | None = state.get("response")
     if previous is None or not previous.city_summary:
         return None
-
     logger.info("carrying the summary forward from the previous turn")
     return SynthesisDraft(city_summary=previous.city_summary, highlights=previous.highlights)
 
@@ -384,7 +358,6 @@ def _response_update(
     errors = state.get("errors") or []
 
     warnings = [f"{error.tool} unavailable: {error.message[:160]}" for error in errors]
-
     response = TravelResponse(
         city=city,
         city_summary=draft.city_summary,
@@ -395,7 +368,6 @@ def _response_update(
         sources=[chunk.source for chunk in knowledge if chunk.source][:6],
         warnings=warnings,
     )
-
     return {
         "response": response,
         "timings": {"synthesize": timer.elapsed_ms},
@@ -424,9 +396,8 @@ def _response_update(
 def _clarify_response(state: TravelState, timer: Timer) -> dict[str, Any]:
     """Build the response for a turn that named no city.
 
-    Guessing would be worse than asking. A confident answer about a city the user
-    never mentioned is harder to detect than a question, because the page looks
-    entirely normal.
+    Better to ask than to guess. If we pick the wrong city the page still looks
+    completely normal, so the mistake is easy to miss.
 
     Args:
         state: Current graph state.
@@ -445,7 +416,6 @@ def _clarify_response(state: TravelState, timer: Timer) -> dict[str, Any]:
         knowledge_source="memory",
         warnings=["No city could be resolved from this turn or from the conversation history."],
     )
-
     return {
         "response": response,
         "timings": {"synthesize": timer.elapsed_ms},

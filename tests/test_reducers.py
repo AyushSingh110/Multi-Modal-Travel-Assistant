@@ -1,11 +1,4 @@
-"""Tests for the state reducers.
-
-These are the most safety-critical pure functions in the project. The parallel
-fan-out (Distinction 2) is only legal because every key written by concurrent
-branches carries a reducer, so "the reducers merge correctly" is not an
-assumption worth making - it is tested directly, and then tested again through a
-real LangGraph fan-out to prove the wiring matches the theory.
-"""
+"""Tests for the state reducers."""
 
 from __future__ import annotations
 

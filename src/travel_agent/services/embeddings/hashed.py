@@ -1,24 +1,4 @@
-"""A dependency-free TF-IDF embedder using the hashing trick.
-
-WHY NOT A NEURAL EMBEDDER BY DEFAULT
-    ``sentence-transformers`` pulls in PyTorch - hundreds of megabytes, a slow
-    cold start, and a download that can fail on a reviewer's machine. OpenAI
-    embeddings need an API key, which breaks the "runs with zero keys" promise.
-
-    This project's retrieval problem is narrow: decide whether a query names one
-    of three seeded cities. That is a *lexical* question, and TF-IDF answers it
-    well. The trade-off is real and worth stating out loud: this embedder has no
-    idea that "the French capital" means Paris. If that mattered, the interface
-    lets a neural embedder be swapped in without touching the store or the router.
-
-HOW IT WORKS
-    1. Split text into lowercase word tokens, drop stopwords.
-    2. Hash each token to a column index (the "hashing trick": no vocabulary
-       needs to be stored, and unseen words at query time are handled naturally).
-    3. Weight each token by ``tf * idf`` - term frequency times inverse document
-       frequency, so a rare word like "shinjuku" counts for far more than "city".
-    4. L2-normalise, so a dot product equals cosine similarity.
-"""
+"""A dependency-free TF-IDF embedder using the hashing trick."""
 
 from __future__ import annotations
 
@@ -26,6 +6,7 @@ import hashlib
 import math
 import re
 from collections import Counter
+from typing import Any
 
 import numpy as np
 
@@ -157,7 +138,7 @@ class HashedTfIdfEmbedder(BaseEmbedder):
         self._default_idf: float = 1.0
         self._document_count: int = 0
 
-    # ------------------------------------------------------------------ fit --
+    # fit
     def fit(self, texts: list[str]) -> None:
         """Compute inverse document frequencies over the corpus.
 
@@ -179,7 +160,7 @@ class HashedTfIdfEmbedder(BaseEmbedder):
         # to documents only - see _embed for why queries drop unknown tokens.
         self._default_idf = math.log(1 + self._document_count) + 1.0
 
-    # ------------------------------------------------------------- embedding --
+    #  embedding
     def embed_documents(self, texts: list[str]) -> np.ndarray:
         """Embed a batch of documents.
 
@@ -220,14 +201,6 @@ class HashedTfIdfEmbedder(BaseEmbedder):
         tokens = self._tokenise(text)
         if drop_unknown:
             # WHY QUERIES DROP OUT-OF-VOCABULARY TOKENS
-            #   With the hashing trick a token maps to a bucket whether or not the
-            #   corpus contains it, so an unknown word lands on some bucket that
-            #   real content also occupies. Giving it the maximum idf weight - the
-            #   textbook treatment for a rare term - made that collision the
-            #   loudest component of the query vector: "Reykjavik" scored 0.10
-            #   against Paris purely by hash accident, higher than several genuine
-            #   matches. An unseen token cannot carry real signal here, so it is
-            #   dropped and contributes nothing.
             tokens = [token for token in tokens if token in self._idf]
         if not tokens:
             return vector
@@ -243,7 +216,7 @@ class HashedTfIdfEmbedder(BaseEmbedder):
 
         return l2_normalise(vector)
 
-    # -------------------------------------------------------------- internals --
+    # internals
     def _tokenise(self, text: str) -> list[str]:
         """Split text into meaningful lowercase tokens.
 
@@ -278,8 +251,8 @@ class HashedTfIdfEmbedder(BaseEmbedder):
         sign = 1.0 if (value >> 63) & 1 else -1.0
         return index, sign
 
-    # ------------------------------------------------------------ persistence --
-    def state_dict(self) -> dict[str, object]:
+    # persistence
+    def state_dict(self) -> dict[str, Any]:
         """Return the learned idf table for persistence.
 
         Returns:
@@ -292,7 +265,7 @@ class HashedTfIdfEmbedder(BaseEmbedder):
             "document_count": self._document_count,
         }
 
-    def load_state_dict(self, state: dict[str, object]) -> None:
+    def load_state_dict(self, state: dict[str, Any]) -> None:
         """Restore a persisted idf table.
 
         Queries must be embedded with the same statistics used to build the index,
@@ -302,10 +275,10 @@ class HashedTfIdfEmbedder(BaseEmbedder):
         Args:
             state: Dictionary produced by :meth:`state_dict`.
         """
-        self.dim = int(state.get("dim", self.dim))  # type: ignore[arg-type]
-        self._idf = dict(state.get("idf", {}))  # type: ignore[arg-type]
-        self._default_idf = float(state.get("default_idf", 1.0))  # type: ignore[arg-type]
-        self._document_count = int(state.get("document_count", 0))  # type: ignore[arg-type]
+        self.dim = int(state.get("dim", self.dim))
+        self._idf = dict(state.get("idf", {}))
+        self._default_idf = float(state.get("default_idf", 1.0))
+        self._document_count = int(state.get("document_count", 0))
 
 
 __all__ = ["HashedTfIdfEmbedder"]

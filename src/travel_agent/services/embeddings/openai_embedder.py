@@ -1,14 +1,8 @@
-"""OpenAI-backed embedder.
-
-The live alternative to the hashed embedder. It exists so the provider
-abstraction is real rather than theoretical: switching to genuine semantic
-embeddings is ``EMBEDDING_PROVIDER=openai`` plus a key, with no other code change.
-
-It is not the default because it requires network access and a paid key, and the
-project's promise is that everything runs with zero keys.
-"""
+"""OpenAI-backed embedder."""
 
 from __future__ import annotations
+
+from typing import Any
 
 import numpy as np
 
@@ -109,7 +103,7 @@ class OpenAIEmbedder(BaseEmbedder):
         self.dim = vectors.shape[1]
         return l2_normalise(vectors)
 
-    def state_dict(self) -> dict[str, object]:
+    def state_dict(self) -> dict[str, Any]:
         """Return the model identity so a store is never queried with a mismatched embedder.
 
         Returns:

@@ -25,7 +25,7 @@ def get_llm(settings: Settings | None = None) -> BaseLLM:
 
     A live driver that cannot be constructed - a missing key, an uninstalled
     package - falls back to the mock with a warning rather than taking the app
-    down, because a demo that renders with mock data beats a demo that does not
+    down, because a demo that runs on mock data is better than one that does not
     start.
 
     Args:

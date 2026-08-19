@@ -1,13 +1,4 @@
-"""Tests for the layered knowledge router and its threshold guard.
-
-Three things are being proved here:
-
-1. The gazetteer layer catches names the similarity score would fumble.
-2. The similarity layer still decides everything the gazetteer has not been
-   taught, and records the score either way.
-3. A misconfigured threshold produces a loud, specific diagnosis instead of an
-   app that silently never touches its own knowledge base.
-"""
+"""Tests for the layered knowledge router and its threshold guard."""
 
 from __future__ import annotations
 

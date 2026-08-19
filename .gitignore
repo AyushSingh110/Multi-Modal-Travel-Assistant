@@ -1,8 +1,8 @@
-# --- secrets ---
+# secrets 
 .env
 *.pem
 
-# --- python ---
+#python catches
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -11,20 +11,23 @@ dist/
 .venv/
 venv/
 
-# --- tooling caches ---
+#tooling caches
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .coverage
 htmlcov/
 
-# --- generated data artifacts ---
+#generated data artifacts
 data/vector_store/
 data/checkpoints.sqlite*
 *.faiss
 *.index
 
-# --- streamlit / os ---
+#streamlit
 .streamlit/secrets.toml
 .DS_Store
 Thumbs.db
+
+# personal engineering journal - not part of the deliverable
+ENGINEERING_JOURNAL.md

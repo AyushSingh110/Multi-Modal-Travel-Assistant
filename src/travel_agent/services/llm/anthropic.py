@@ -34,7 +34,9 @@ class AnthropicLLM(LangChainLLM):
         try:
             from langchain_anthropic import ChatAnthropic
         except ImportError as exc:  # pragma: no cover - pinned dependency
-            raise ConfigurationError(f"langchain-anthropic is not installed: {exc}") from exc
+            raise ConfigurationError(
+                f"langchain-anthropic could not be imported - it is missing, or its version does not match langchain-core: {exc}"
+            ) from exc
 
         client = ChatAnthropic(
             model=resolved.anthropic_model,

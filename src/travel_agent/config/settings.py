@@ -1,13 +1,4 @@
-"""Centralised application configuration.
-
-Everything tunable lives here: provider selection, model ids, latency knobs,
-retrieval thresholds, paths. No other module reads ``os.environ`` and no other
-module hard-codes a path or a magic number.
-
-Values come from environment variables (and a ``.env`` file when present) via
-``pydantic-settings``, which means every setting is *typed and validated at
-start-up* rather than blowing up halfway through a request.
-"""
+"""Typed application settings, loaded once from the environment."""
 
 from __future__ import annotations
 
@@ -26,16 +17,11 @@ ImageFallbackMode = Literal["auto", "remote", "local"]
 VectorStoreBackend = Literal["faiss", "numpy"]
 CheckpointerKind = Literal["memory", "sqlite"]
 
-# <repo root>/src/travel_agent/config/settings.py -> parents[3] is the repo root.
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 class Settings(BaseSettings):
-    """Typed application settings loaded from the environment.
-
-    Attributes are grouped to mirror ``.env.example`` so the two stay readable
-    side by side.
-    """
+    """Application configuration, loaded from environment variables."""
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",
@@ -43,8 +29,7 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
-
-    # ---------------------------------------------------------------- LLM ----
+    # LLM
     llm_provider: LLMProvider | None = Field(
         default=None,
         description="Explicit provider override. When None the provider is auto-detected.",
@@ -59,16 +44,14 @@ class Settings(BaseSettings):
     llm_timeout_seconds: float = 30.0
     llm_max_retries: int = 3
 
-    # -------------------------------------------------------------- tools ----
+    # tools
     weather_provider: ToolProvider = "mock"
     image_provider: ToolProvider = "mock"
     search_provider: ToolProvider = "mock"
     openweather_api_key: str | None = None
     unsplash_access_key: str | None = None
     tavily_api_key: str | None = None
-    # Per-tool mock latency. Weather and images differ on purpose: the parallel
-    # fan-out speed-up is measured against these numbers, and two branches with
-    # identical durations would make the measurement look staged.
+    # Latencies differ per tool: equal branches would make the speed-up look staged.
     mock_weather_latency_ms: int = 900
     mock_image_latency_ms: int = 1100
     mock_search_latency_ms: int = 800

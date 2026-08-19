@@ -1,9 +1,4 @@
-"""Embedder selection.
-
-One function decides which embedding implementation the rest of the app gets,
-based on configuration. Nothing else imports a concrete embedder class, so
-changing the default is a one-line config change rather than a code change.
-"""
+"""Embedder selection."""
 
 from __future__ import annotations
 
