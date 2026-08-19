@@ -9,6 +9,7 @@ state, which is what makes the similarity threshold meaningful.
 from __future__ import annotations
 
 import re
+import unicodedata
 from pathlib import Path
 
 import numpy as np
@@ -24,10 +25,32 @@ from travel_agent.services.vectorstore.factory import load_vector_store
 
 logger = get_logger(__name__)
 
+
 # Lexical shortcuts for names the corpus does not spell the way people type them.
 # This is a gazetteer, not intelligence: it exists so "NYC" and "New York City"
 # reach the same profile as "New York" without relying on a similarity score to
 # make a decision that is really a naming convention.
+def normalise_city_name(text: str) -> str:
+    """Fold a city name to a comparable form.
+
+    Strips accents, punctuation and case so that "Zurich", "zürich" and
+    "ZÜRICH" are one key. Unicode decomposition (NFKD) splits an accented
+    character into its base letter plus a combining mark, and the marks are then
+    discarded - which is why this works for any accented name, not just ones
+    someone remembered to add to a lookup table.
+
+    Args:
+        text: Raw city name as typed.
+
+    Returns:
+        The folded form, or an empty string when nothing usable remains.
+    """
+    decomposed = unicodedata.normalize("NFKD", text.strip().lower())
+    without_accents = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    cleaned = re.sub(r"[^a-z0-9 ]+", " ", without_accents)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 CITY_ALIASES: dict[str, str] = {
     "nyc": "New York",
     "new york city": "New York",
@@ -196,22 +219,27 @@ class KnowledgeRetriever:
         Returns:
             The matching store city, or ``None`` when there is no exact match.
         """
-        normalised = re.sub(r"[^a-z0-9 ]+", "", text.strip().lower())
-        normalised = re.sub(r"\s+", " ", normalised)
+        normalised = normalise_city_name(text)
         if not normalised:
             return None
 
-        for city in self.known_cities:
-            if normalised == city.lower():
-                return city
-
-        alias_target = CITY_ALIASES.get(normalised)
-        if alias_target and alias_target in self.known_cities:
-            return alias_target
-
-        # "<city> city" is a common way to type it; try again without the suffix.
+        # Candidate forms, most literal first: the whole string, the part before a
+        # comma ("Tokyo, Japan"), and the string without a trailing "city".
+        candidates = [normalised]
+        if "," in text:
+            head = normalise_city_name(text.split(",", 1)[0])
+            if head:
+                candidates.append(head)
         if normalised.endswith(" city"):
-            return self.find_city_by_name(normalised[: -len(" city")])
+            candidates.append(normalised[: -len(" city")].strip())
+
+        known = {normalise_city_name(city): city for city in self.known_cities}
+        for candidate in candidates:
+            if candidate in known:
+                return known[candidate]
+            alias_target = CITY_ALIASES.get(candidate)
+            if alias_target and alias_target in self.known_cities:
+                return alias_target
         return None
 
     def chunks_for_city(self, city: str, limit: int = 8) -> list[KnowledgeChunk]:
@@ -250,4 +278,4 @@ def try_load_retriever(settings: Settings | None = None) -> KnowledgeRetriever |
         return None
 
 
-__all__ = ["KnowledgeRetriever", "try_load_retriever"]
+__all__ = ["CITY_ALIASES", "KnowledgeRetriever", "normalise_city_name", "try_load_retriever"]

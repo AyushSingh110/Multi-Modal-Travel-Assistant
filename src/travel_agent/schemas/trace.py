@@ -100,6 +100,39 @@ class TokenUsage(BaseModel):
         )
 
 
+class ThresholdDiagnostics(BaseModel):
+    """Result of the router's start-up threshold check.
+
+    Surfaced in the UI as well as the logs, because a badly configured threshold
+    produces an app that looks healthy while silently never using its own
+    knowledge base.
+
+    Attributes:
+        threshold: The configured value.
+        status: ``ok``, ``too_high``, ``too_low`` or ``unknown``.
+        lowest_known_score: Weakest score among cities the store does cover.
+        highest_unknown_score: Strongest score among control cities it does not.
+        weakest_known_city: Which seeded city scored lowest.
+        strongest_unknown_city: Which control city scored highest.
+        message: Human-readable verdict, ready to log or display.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    threshold: float
+    status: Literal["ok", "too_high", "too_low", "unknown"]
+    lowest_known_score: float = 0.0
+    highest_unknown_score: float = 0.0
+    weakest_known_city: str = ""
+    strongest_unknown_city: str = ""
+    message: str = ""
+
+    @property
+    def is_healthy(self) -> bool:
+        """Whether the threshold sits inside the measured separation band."""
+        return self.status == "ok"
+
+
 class ParallelMetrics(BaseModel):
     """Evidence for the parallel fan-out claim.
 
@@ -119,4 +152,11 @@ class ParallelMetrics(BaseModel):
     speedup: float = 1.0
 
 
-__all__ = ["EventKind", "ParallelMetrics", "TokenUsage", "ToolErrorRecord", "TraceEvent"]
+__all__ = [
+    "EventKind",
+    "ParallelMetrics",
+    "ThresholdDiagnostics",
+    "TokenUsage",
+    "ToolErrorRecord",
+    "TraceEvent",
+]

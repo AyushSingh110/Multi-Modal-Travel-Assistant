@@ -20,7 +20,15 @@ Intent = Literal[
     "clarify",  # no city could be resolved: ask the user
 ]
 
-RouteName = Literal["vector", "web"]
+RouteName = Literal["vector", "web", "clarify"]
+
+# How the router arrived at its answer. Displayed in the trace panel so the
+# decision is explainable rather than a bare verdict.
+MatchReason = Literal[
+    "exact",  # the city name matched the gazetteer outright
+    "similarity",  # the centroid cosine score decided it
+    "none",  # no city could be resolved from the turn
+]
 
 
 class DateRange(BaseModel):
@@ -107,19 +115,31 @@ class RouteDecision(BaseModel):
 
     Attributes:
         route: Which knowledge source won.
-        score: Best cosine similarity between the query and the seeded corpus.
+        match_reason: Which layer of the router decided - the gazetteer or the
+            similarity score.
+        score: Best centroid cosine similarity for the resolved city.
         threshold: The value ``score`` was compared against.
         matched_city: Closest city in the vector store, whatever the outcome.
+        all_scores: Score for every known city, so the UI can show the runners-up.
         reason: Plain-English justification, shown in the trace panel.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     route: RouteName
-    score: float
-    threshold: float
+    match_reason: MatchReason = "similarity"
+    score: float = 0.0
+    threshold: float = 0.0
     matched_city: str | None = None
+    all_scores: dict[str, float] = Field(default_factory=dict)
     reason: str = ""
 
 
-__all__ = ["DateRange", "Intent", "IntentDecision", "RouteDecision", "RouteName"]
+__all__ = [
+    "DateRange",
+    "Intent",
+    "IntentDecision",
+    "MatchReason",
+    "RouteDecision",
+    "RouteName",
+]

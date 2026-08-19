@@ -3,9 +3,10 @@
 A working record of how this project was built, written so I can explain any part
 of it out loud without re-reading the code.
 
-> **Status:** build steps 1-6 complete (environment, foundations, schemas,
-> services, seed corpus, vector store). The tool layer, graph, UI and docs are
-> still to come. Sections marked *(pending)* will be filled in as those land.
+> **Status:** build steps 1-7 complete (environment, foundations, schemas,
+> services, seed corpus, vector store, layered router, tool layer). The graph,
+> UI and docs are still to come. Sections marked *(pending)* fill in as those
+> land.
 
 ---
 
@@ -380,10 +381,15 @@ score (0.040), and the default is now **0.07**, which sits inside that gap.
 `evals/run_eval.py` will sweep the threshold across a labelled query set to
 confirm the choice rather than assert it.
 
-**The lesson I would state out loud:** the absolute value of a similarity score
-is close to meaningless on its own. What matters is the *separation* between the
-two populations you are trying to distinguish, and you only find that by
-measuring.
+**The lesson I would state out loud:** the absolute cosine value means nothing;
+only the separation between the two populations you are trying to distinguish
+means anything, and you only get that by measuring.
+
+Two follow-on consequences, both now built:
+
+* the router no longer relies on that single number alone (section 7.1);
+* a start-up guard measures the separation on every run and makes this failure
+  impossible to reproduce silently (section 7.2).
 
 ### 6.6 The router must score the extracted city, not the raw sentence
 
@@ -435,7 +441,158 @@ shell. Not an application bug, but it cost real time, so it is recorded here.
 
 ---
 
-## 7. Requirement traceability *(in progress)*
+## 7. Hardening the router
+
+### 7.1 Why layered, not a single threshold
+
+The measured separation is real but thin: seeded cities score 0.10 to 0.21,
+unseeded ones 0.00 to 0.04. A single gate at 0.07 works on the probes I measured,
+but it is fragile in two specific ways. Anything landing in the 0.04-0.10 band is
+decided by a hair. And "NYC" - a city the knowledge base covers in nine
+documents - would fail it outright, because "nyc" is not a token in the corpus at
+all.
+
+So the router now asks a cheaper, more certain question first:
+
+| Layer | Question | Outcome | match_reason |
+|---|---|---|---|
+| 1. Gazetteer | Does this name, or an alias of it, match a city I hold documents for? | vector store | `exact` |
+| 2. Similarity | Is the centroid cosine above the threshold? | vector store or web | `similarity` |
+| 3. Nothing | Was any city resolved at all? | clarify | `none` |
+
+The reasoning: whether the knowledge base has documents about a city is, in the
+ordinary case, **a question about names**, and a name lookup answers it exactly.
+Answering a naming question with a cosine threshold is how you end up explaining
+to a panel why "NYC" went to web search. Only when the name is unrecognised does
+the similarity score have to make a judgement call - and that is the case it is
+genuinely good at, because an unseen city name scores 0.000.
+
+Name folding is Unicode-aware rather than a lookup table of accented spellings.
+NFKD decomposition splits an accented character into a base letter plus a
+combining mark, and the marks are discarded, so "Zurich", "zürich" and "ZÜRICH"
+fold to one key - and it works for names nobody remembered to add.
+
+**Crucially, layering does not hide the measurement.** An exact match still
+records the similarity score, the threshold, and every city's score, so the UI
+can say:
+
+> routed to vector store (exact match on 'Tokyo'; similarity 0.207, threshold 0.07)
+
+The score became *displayed confidence* rather than a single fragile gate.
+
+**The trade-off, stated plainly.** The gazetteer needs maintenance: every new city
+and nickname added to the corpus is another entry, and one that drifts out of date
+stops catching things without complaining. The similarity path is what
+generalises, and it still decides every case the gazetteer has not been taught. At
+this corpus size layering is clearly right; past a few hundred cities the
+gazetteer should be *generated* from the corpus instead of hand-maintained.
+
+### 7.2 The start-up guard, or making a silent failure loud
+
+The 0.55 threshold bug had one property that made it dangerous: it failed
+**silently**. Every city would route to web search, every answer would still
+render, and nothing would say the vector store had been skipped. The app looked
+healthy.
+
+`KnowledgeRouter.check_threshold` now measures the separation at start-up - the
+lowest score among cities the store covers, the highest among control cities it
+does not - and classifies the configured threshold:
+
+* **too_high**: at or above the lowest seeded-city score. The message names the
+  city, the measured band, the value that would be correct, and the exact setting
+  to change.
+* **too_low**: at or below the highest unseeded-city score, so cities the store
+  knows nothing about could be answered from it.
+* **ok**: inside the band, with the margin reported.
+
+Anything other than `ok` is logged as a fenced warning block, and the diagnostics
+are a Pydantic model so the UI can display the same verdict rather than leaving it
+in a terminal nobody is watching. A test asserts the exact 0.55 case is caught.
+
+---
+
+## 8. Step 7 - The tool layer
+
+### 8.1 Mock data that survives being looked at
+
+The mocks are the demo. If the forecast chart looks fake, the architecture behind
+it does not get the benefit of the doubt, so both mock providers are built to be
+inspected.
+
+**Weather.** Not `random.uniform(10, 25)`. Each city carries a real monthly
+climate table, and three properties of actual weather are reproduced: a seasonal
+baseline interpolated between months, day-to-day persistence through smooth sine
+walks rather than independent daily draws, and conditions derived from the
+precipitation number so the labels and the chart cannot disagree. Output is
+deterministic per city and start date, which matters when a panel asks you to run
+it again. Measured:
+
+```
+Tokyo from 2026-08-19          Tokyo from 2026-01-19
+  24.0 / 31.2 C   41%            3.3 / 11.1 C   10%
+  23.4 / 30.3 C   43%            3.0 / 10.5 C    9%
+  22.8 / 29.5 C   45%            2.5 /  9.8 C    9%
+```
+
+Tests assert the series is neither flat (standard deviation above 0.5) nor
+implausibly jumpy (no day-to-day swing above 8 C), that August in Tokyo is more
+than 12 C warmer than January, and that New York in January is colder than Tokyo
+in January.
+
+**Images.** Every curated URL was verified with a real HTTP request returning
+`200 image/jpeg`, because a gallery of broken thumbnails is worse than no gallery
+at all. Cities with no curated set get seeded placeholder photography whose
+caption says exactly that - captioning a stock photo as Kyoto would be a lie the
+UI then repeats to the user.
+
+### 8.2 Four failure modes, not one flag
+
+The rubric asks whether the app survives a failing weather API. The honest answer
+is a toggle that breaks it live in front of the reviewer, so failure injection is
+built into the mocks rather than bolted on afterwards - and it simulates four
+shapes, because they fail differently:
+
+| Mode | Simulates | Retried? |
+|---|---|---|
+| `timeout` | provider hangs past the deadline | yes |
+| `server_error` | HTTP 500 | yes |
+| `rate_limit` | HTTP 429 with `Retry-After` | yes, honouring the header |
+| `malformed` | HTTP 200 with an unusable body | **no** |
+
+The last row is the one worth talking about. A malformed payload is a
+*deterministic* failure - the provider answered successfully with data we cannot
+use - so retrying spends the user's time and the provider's quota on a guaranteed
+identical result. `MalformedPayloadError` deliberately does not inherit from
+`RetryableError`, and a test asserts no retry is attempted.
+
+### 8.3 Where degradation actually lives
+
+`ToolRegistry.execute` **never raises**. It returns a `ToolResult` carrying either
+a payload or an error, alongside the duration, attempt count and provider name.
+That is a deliberate boundary: deciding *the graph survives this* belongs in one
+place, while turning an error into a `ToolMessage` the model can read is the
+executor node's job in the next step. A test proves the rubric case directly -
+with weather failing, images and search still return their data.
+
+### 8.4 Two things that surprised me here
+
+**The gallery was going to be 25 MB.** The verified Commons photographs are
+originals: the Eiffel Tower image alone is 5.3 MB, so one city's gallery meant
+roughly 25 MB of downloads. Commons accepts a `width` parameter that returns a
+scaled rendition, and the same photo drops to 339 KB. I only caught it because I
+checked the response *size*, not just the status code.
+
+**A shell loop silently broke my URL verification.** Re-checking all sixteen URLs
+in a `while read` loop reported `000` - no connection - for fifteen of them,
+contradicting an earlier run that returned `200`. The cause was not the URLs:
+`curl` inside a `while read` loop consumes the loop's own stdin. Redirecting
+`</dev/null` restored the correct result. Worth recording because the symptom
+looked exactly like "the network is down" and would have sent me rewriting code
+that was already correct.
+
+---
+
+## 9. Requirement traceability *(in progress)*
 
 | Assignment requirement | Where it lives | One-line explanation |
 |---|---|---|
@@ -445,13 +602,17 @@ shell. Not an application bug, but it cost real time, so it is recorded here.
 | Manual tool execution (Distinction 1) | `graph/nodes/tool_executor.py` | *(pending)* |
 | Parallel fan-out (Distinction 2) | `graph/edges.py`, `graph/builder.py` | *(pending)* |
 | Checkpointer + follow-up (Distinction 3) | `graph/builder.py`, `graph/nodes/classify_intent.py` | *(pending)* |
-| Conditional edge on knowledge availability | `graph/edges.py` | *(pending)* |
+| Conditional edge on knowledge availability | `services/router.py`, `graph/edges.py` | Layered decision: gazetteer, then centroid similarity against the threshold. *(edge wiring pending)* |
+| Web search path for unknown cities | `tools/search/{mock,live}.py` | Mock plus DuckDuckGo and Tavily implementations. |
+| Weather tool, 5-7 day forecast | `tools/weather/{mock,live}.py` | Climate-plausible mock; OpenWeatherMap live. |
+| Image retrieval | `tools/images/{mock,live}.py` | Verified Commons photographs; Unsplash live. |
+| Graceful degradation when a tool fails | `tools/registry.py`, `tools/retry.py` | `execute()` returns an error result rather than raising; retries are bounded. |
 | Streamlit UI with chart and gallery | `ui/app.py` | *(pending)* |
 | `graph.png` | repo root, `scripts/export_graph.py` | *(pending)* |
 
 ---
 
-## 8. Things I deliberately did not do *(running list)*
+## 10. Things I deliberately did not do *(running list)*
 
 * **No `sentence-transformers` by default** - the download and cold start are not
   worth it for a three-city corpus. The interface supports it.
@@ -466,4 +627,4 @@ shell. Not an application bug, but it cost real time, so it is recorded here.
 
 ---
 
-## 9. Interview Q&A *(pending - written once the graph and UI land)*
+## 11. Interview Q&A *(pending - written once the graph and UI land)*

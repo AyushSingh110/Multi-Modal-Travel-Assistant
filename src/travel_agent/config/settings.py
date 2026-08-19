@@ -21,6 +21,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 LLMProvider = Literal["groq", "anthropic", "openai", "mock"]
 ToolProvider = Literal["live", "mock"]
 EmbeddingProvider = Literal["hashed", "openai"]
+FailureMode = Literal["none", "timeout", "server_error", "malformed", "rate_limit"]
 VectorStoreBackend = Literal["faiss", "numpy"]
 CheckpointerKind = Literal["memory", "sqlite"]
 
@@ -64,9 +65,23 @@ class Settings(BaseSettings):
     openweather_api_key: str | None = None
     unsplash_access_key: str | None = None
     tavily_api_key: str | None = None
-    mock_latency_min_ms: int = 600
-    mock_latency_max_ms: int = 1400
+    # Per-tool mock latency. Weather and images differ on purpose: the parallel
+    # fan-out speed-up is measured against these numbers, and two branches with
+    # identical durations would make the measurement look staged.
+    mock_weather_latency_ms: int = 900
+    mock_image_latency_ms: int = 1100
+    mock_search_latency_ms: int = 800
+    mock_latency_jitter: float = 0.15
+
+    # Failure injection - powers the "break the weather API" demo toggle.
     force_weather_failure: bool = False
+    weather_failure_mode: FailureMode = "server_error"
+    force_image_failure: bool = False
+    image_failure_mode: FailureMode = "server_error"
+
+    # Per-attempt tool timeout and attempt budget.
+    tool_timeout_seconds: float = 12.0
+    tool_max_attempts: int = 3
 
     # ---------------------------------------------------------- retrieval ----
     embedding_provider: EmbeddingProvider = "hashed"

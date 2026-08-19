@@ -1,0 +1,58 @@
+# Conda environment for the Multi-Modal Travel Assistant.
+#
+#   conda env create -f environment.yml
+#   conda activate travel-agent
+#
+# That single command produces a working setup: Python 3.11 plus every pinned
+# dependency. requirements.txt is the equivalent for reviewers who prefer a
+# plain venv, and the two lists are kept in step.
+#
+# Pins were resolved and installed on 2026-08-18 and are verified by
+# scripts/smoke_test.py, which imports every package and prints its version.
+# Python packages come from pip rather than the conda channels because the
+# LangGraph / LangChain 1.x stack is not carried by defaults or conda-forge.
+name: travel-agent
+
+channels:
+  - defaults
+
+dependencies:
+  - python=3.11
+  - pip>=24.0
+  - pip:
+      # --- orchestration ---------------------------------------------------
+      - langgraph==1.2.11                   # graph runtime: nodes, edges, supersteps
+      - langgraph-checkpoint==4.2.0         # checkpointer base class (Distinction 3)
+      - langgraph-checkpoint-sqlite==3.1.1  # durable thread memory across restarts
+      - langchain-core==1.5.6               # AIMessage / ToolMessage types
+
+      # --- LLM providers (all four implemented; chosen at runtime) ----------
+      - langchain-groq==1.1.3               # default demo driver
+      - langchain-anthropic==1.5.6          # spec-named provider
+      - langchain-openai==1.5.2             # spec-named provider
+
+      # --- schemas and configuration ---------------------------------------
+      - pydantic==2.13.4                    # structured output contract
+      - pydantic-settings==2.15.0           # typed settings, no magic strings
+
+      # --- retrieval --------------------------------------------------------
+      - faiss-cpu==1.15.0                   # vector index (NumPy fallback exists)
+      - numpy==2.3.5                        # vectors and the fallback store
+
+      # --- io ---------------------------------------------------------------
+      - httpx==0.28.1                       # async HTTP with real timeouts
+      - ddgs==9.15.0                        # optional live web search
+
+      # --- user interface ---------------------------------------------------
+      - streamlit==1.61.1                   # GUI
+      - plotly==6.9.0                       # forecast line chart
+      - pandas==3.0.5                       # chart dataframe
+
+      # --- quality gates ----------------------------------------------------
+      - pytest==9.1.1
+      - pytest-asyncio==1.4.0
+      - pytest-cov==7.0.0
+      - ruff==0.16.3
+      - black==26.5.1
+      - mypy==2.3.1
+      - pre-commit==4.6.2
