@@ -34,7 +34,9 @@ ignore = ["D203", "D213", "E501"]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["D103", "D100", "ARG001", "ARG005"]
+# Test doubles implement provider interfaces and must keep their signatures
+# even when a stub ignores the arguments.
+"tests/*" = ["D103", "D100", "ARG001", "ARG002", "ARG005"]
 # LangGraph node callables must accept `state` even when they ignore it.
 "scripts/*" = ["D103", "ARG001", "ARG005"]
 

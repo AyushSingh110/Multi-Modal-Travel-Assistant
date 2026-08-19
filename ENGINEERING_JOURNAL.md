@@ -3,10 +3,10 @@
 A working record of how this project was built, written so I can explain any part
 of it out loud without re-reading the code.
 
-> **Status:** build steps 1-7 complete (environment, foundations, schemas,
-> services, seed corpus, vector store, layered router, tool layer). The graph,
-> UI and docs are still to come. Sections marked *(pending)* fill in as those
-> land.
+> **Status:** build steps 1-8 complete (environment, foundations, schemas,
+> services, seed corpus, vector store, layered router, tool layer, manual tool
+> executor). Graph assembly, UI and docs still to come. Sections marked
+> *(pending)* fill in as those land.
 
 ---
 
@@ -559,11 +559,29 @@ shapes, because they fail differently:
 | `rate_limit` | HTTP 429 with `Retry-After` | yes, honouring the header |
 | `malformed` | HTTP 200 with an unusable body | **no** |
 
-The last row is the one worth talking about. A malformed payload is a
-*deterministic* failure - the provider answered successfully with data we cannot
-use - so retrying spends the user's time and the provider's quota on a guaranteed
-identical result. `MalformedPayloadError` deliberately does not inherit from
-`RetryableError`, and a test asserts no retry is attempted.
+The last row is the one worth talking about.
+
+**Why not just retry everything?** Because retrying only helps when the failure
+is *transient* - when the same call, made again, might succeed. A timeout, a 500
+and a 429 are all transient: the provider is overloaded, or the network hiccupped,
+and a second attempt is a genuinely different roll of the dice.
+
+A malformed payload is not. The provider answered successfully; it returned HTTP
+200 and a body we cannot parse. Nothing about the request was wrong, so making it
+again produces the identical unusable response. Retrying it three times spends
+three times the user's waiting time and three times the provider's quota to
+arrive at exactly the same failure - and on a rate-limited free tier, those wasted
+calls can push the *next* legitimate request over the limit.
+
+The same reasoning governs argument validation errors: if the model sent
+`days=99`, sending it again unchanged fails again. That failure needs to go back
+to the *model* so it can correct itself, not back to the provider.
+
+So the retry decision is encoded in the exception hierarchy rather than in a list
+of status codes at the call site: `RetryableError` and its subclasses are retried,
+everything else is raised immediately. `MalformedPayloadError` deliberately does
+not inherit from `RetryableError`, and a test asserts that zero retries are
+attempted for it.
 
 ### 8.3 Where degradation actually lives
 
@@ -592,14 +610,183 @@ that was already correct.
 
 ---
 
-## 9. Requirement traceability *(in progress)*
+### 8.5 The gallery must survive the demo network
+
+**The risk.** The gallery loads photographs from Wikimedia Commons. That makes the
+single most visual part of the app depend on Commons being reachable *at the exact
+moment of the demo*. Blocked network, captive-portal wifi, a corporate proxy - any
+of those turns the screenshot that matters into a grid of broken-image icons.
+
+**The fix, in two parts.**
+
+1. **Bundled fallbacks.** `data/images/` holds sixteen generated placeholder PNGs,
+   about 12 KB each and 202 KB in total, committed to the repository. Every
+   curated image names one, and cities with no curated set get generic ones. They
+   are deliberately *not* copies of the Commons photographs: redistributing
+   someone else's photograph would mean shipping their licence obligations with
+   the repo. They are gradient-and-skyline placeholders that say "offline fallback
+   image" on their face, and they exist to keep the layout intact rather than to
+   pretend to be photography.
+2. **A one-shot reachability probe.** `IMAGE_FALLBACK_MODE=auto` (the default)
+   probes Commons once per process with a 2.5 second timeout and caches the
+   answer; `remote` and `local` force either side for testing and for a guaranteed
+   offline demo. Every `ImageAsset` carries both a URL and a local path, and
+   `display_source` picks between them - falling back only when the probe failed
+   *and* a bundled file actually exists, so a missing fallback can never replace a
+   working URL.
+
+**The bug this uncovered, which is the interesting part.** The first version of
+the probe reported Commons as unreachable on a perfectly healthy network. The
+cause was not connectivity: Wikimedia's user-agent policy rejects generic library
+agents, so `python-httpx/0.28.1` was getting **HTTP 403**. That is the worst class
+of failure for a fallback mechanism - a *false negative* that silently downgrades
+a working demo to placeholders while looking like it worked correctly. Sending a
+descriptive `User-Agent` fixed it, and the reason is written into the code next to
+the header so nobody removes it later.
+
+**Attribution.** `data/images/ATTRIBUTION.md` credits every photograph with its
+photographer and licence, and the licences are varied - Public domain, CC BY 2.0,
+CC BY 4.0, CC BY-SA 2.0/3.0/4.0. Those were read from the Commons API rather than
+assumed, because guessing a licence in a submitted repository is worse than not
+crediting at all. The credit string travels with each asset so the interface can
+display it next to the image, which is what the CC BY licences actually require.
+Fetching that metadata hit a 429 from the Commons API, which is a small joke at
+the expense of section 8.2.
+
+---
+
+## 9. Step 8 - Distinction 1: the manual tool executor
+
+This is the piece the assignment weights most heavily, so it gets its own
+section.
+
+### 9.1 What the raw protocol actually is
+
+A language model cannot run code. It only produces text. So "the model used a
+tool" is really a three-part exchange, and my program owns the middle part.
+
+**Part 1 - I advertise the tools.** Along with the question, I send a list of
+functions the model may request: a name, a description, and a JSON schema for the
+arguments. Those schemas are generated from Pydantic models, so the thing I
+advertise and the thing I validate against can never drift apart.
+
+**Part 2 - the model asks.** Rather than answering in prose, it replies with a
+structured request that arrives as an `AIMessage` whose `.tool_calls` looks like:
+
+```python
+{"id": "call_a1b2c3",              # the model's handle for THIS request
+ "name": "get_weather_forecast",   # which advertised tool it wants
+ "args": {"city": "Tokyo", "days": 7},
+ "type": "tool_call"}
+```
+
+It has not executed anything. It has produced a request and stopped.
+
+**Part 3 - I answer, and the id is the whole game.** I run the function and send
+the result back as a `ToolMessage` carrying `tool_call_id` set to the *exact* id
+from the request it answers.
+
+The id matters because a model can ask for several tools at once - this project
+routinely requests weather and images in the same turn - and my replies come back
+as separate messages in whatever order the tools happened to finish. Since they
+run concurrently, that is frequently *not* the order they were requested in. The
+id is the only thing tying an answer to its question; position tells you nothing.
+
+**What breaks if you get it wrong**, which is the part I would be asked:
+
+* **Wrong id** - the model attributes the weather data to the image request, then
+  confidently describes photographs of a seven-day forecast. Nothing raises. You
+  just get nonsense, and it looks like a model quality problem.
+* **A missing ToolMessage** - most providers, Groq and OpenAI included, reject the
+  *next* request outright, because the conversation now contains a question with
+  no answer. A hard API error, mid-conversation.
+* **Reporting failure as success** - the subtle one. See below.
+
+### 9.2 status="error" is not cosmetic
+
+If a tool fails and I return the string `"error: connection timed out"` as an
+ordinary tool result, the model has no way to know anything went wrong. It reads
+that text as the legitimate output of the weather tool and summarises accordingly:
+"the weather in Paris is error: connection timed out."
+
+`ToolMessage` has a `status` field for exactly this. Setting `status="error"`
+tells the model the call did not succeed, so it can work around the gap honestly
+instead of treating the error text as data. I only found this by introspecting the
+installed `ToolMessage` in the Phase 1 recon rather than assuming its shape, and
+it is used for real in every failure path here.
+
+The error *content* matters too. For an unknown tool name the message includes the
+list of tools that do exist, so the model can correct itself on the next turn
+instead of guessing again. For a validation failure it carries the actual Pydantic
+detail - which field, what was wrong - rather than a generic "invalid arguments",
+for the same reason.
+
+### 9.3 What ToolNode would have done, and what I gained by not using it
+
+`langgraph.prebuilt.ToolNode` does all of the above in one line. It is the right
+choice in most production code. Writing it out bought three specific things:
+
+1. **Per-tool error isolation.** Each call is executed independently through
+   `asyncio.gather(..., return_exceptions=True)`, so one dead tool becomes one
+   error message while its siblings return their data normally. A test asserts
+   that with weather broken, the image and search calls still succeed and still
+   file their payloads into state.
+2. **Selective execution.** An executor instance can be told it handles only
+   *some* tool names. That is precisely what lets the weather branch and the image
+   branch of the parallel fan-out run the same class concurrently in different
+   graph nodes, each picking its own calls out of the same `AIMessage`.
+3. **Observability.** Every call emits a trace event with the tool, the id, the
+   arguments, the provider, the attempt count and the duration. That is the data
+   the UI trace panel renders, and a prebuilt node would not surface it.
+
+**What I gave up**, stated plainly: I now own schema validation and id
+correctness. A subtle bug in either would be silent - the wrong-id failure above
+raises nothing at all. That is a real cost, and the mitigation is that both are
+pinned down by tests: id pairing is verified with the weather tool deliberately
+made slower than the image tool, so the results *do* arrive out of order and the
+assertions would fail if pairing were positional.
+
+### 9.4 The promise is mechanised, not remembered
+
+A comment saying "we do not use ToolNode" is worth nothing six weeks later.
+`test_no_prebuilt_tool_calling_helpers_anywhere_in_the_source` walks every Python
+file in `src/` and `scripts/` and fails if `ToolNode`, `create_tool_calling_agent`
+or `create_react_agent` appear, or if anything imports from `langgraph.prebuilt`.
+
+Two details make it trustworthy rather than decorative:
+
+* It checks **imports via the AST and identifiers via the tokeniser**, so an
+  aliased or function-local import cannot slip past a plain text search.
+* It **ignores comments and strings**. The executor's own docstring discusses
+  ToolNode at length, and documenting a decision must not break the check that
+  enforces it. A companion test asserts a deliberate violation *would* be caught,
+  because a guard that cannot fail is not a guard.
+
+### 9.5 One thing that surprised me
+
+I wrote a test for the case where a provider returns tool arguments as a JSON
+string rather than an object, since that genuinely happens. It failed - but not in
+the code. `langchain-core` validates `tool_calls[].args` as a dictionary when the
+`AIMessage` is constructed, so a string simply cannot reach my node; it is
+normalised one layer below.
+
+The right response was to move the test rather than write defensive code for a
+case that cannot occur. The tool specs still accept the string form, because raw
+provider payloads can carry it before they become an `AIMessage`, and the test now
+documents exactly where that boundary sits. Dead defensive code is a liability in
+an interview - you get asked what it protects against, and "nothing, actually" is
+a bad answer.
+
+---
+
+## 10. Requirement traceability *(in progress)*
 
 | Assignment requirement | Where it lives | One-line explanation |
 |---|---|---|
 | Vector store seeded with 3 cities | `data/city_facts/*.md`, `scripts/seed_vectorstore.py` | 27 chunks across Paris, Tokyo and New York, 9 each. |
 | Typed state | `src/travel_agent/schemas/state.py` | `TypedDict` with `Annotated` reducers on every concurrently-written key. |
 | Structured output object | `src/travel_agent/schemas/response.py` | `TravelResponse` with `city_summary`, `weather_forecast`, `image_urls`. |
-| Manual tool execution (Distinction 1) | `graph/nodes/tool_executor.py` | *(pending)* |
+| Manual tool execution (Distinction 1) | `graph/nodes/tool_executor.py` | Hand-parses `tool_calls`, validates against the Pydantic schema, dispatches, and returns `ToolMessage` with matching ids and `status="error"` on failure. No prebuilt helpers - enforced by a test. |
 | Parallel fan-out (Distinction 2) | `graph/edges.py`, `graph/builder.py` | *(pending)* |
 | Checkpointer + follow-up (Distinction 3) | `graph/builder.py`, `graph/nodes/classify_intent.py` | *(pending)* |
 | Conditional edge on knowledge availability | `services/router.py`, `graph/edges.py` | Layered decision: gazetteer, then centroid similarity against the threshold. *(edge wiring pending)* |
@@ -612,7 +799,7 @@ that was already correct.
 
 ---
 
-## 10. Things I deliberately did not do *(running list)*
+## 11. Things I deliberately did not do *(running list)*
 
 * **No `sentence-transformers` by default** - the download and cold start are not
   worth it for a three-city corpus. The interface supports it.
@@ -627,4 +814,4 @@ that was already correct.
 
 ---
 
-## 11. Interview Q&A *(pending - written once the graph and UI land)*
+## 12. Interview Q&A *(pending - written once the graph and UI land)*

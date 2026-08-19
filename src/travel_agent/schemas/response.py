@@ -88,9 +88,29 @@ class ImageAsset(BaseModel):
     url: str = Field(description="Direct https URL to the image.")
     caption: str = Field(default="", max_length=200)
     credit: str = Field(
-        default="", max_length=120, description="Photographer or source attribution."
+        default="", max_length=160, description="Photographer and licence attribution."
     )
     provider: str = "mock"
+    local_path: str | None = Field(
+        default=None,
+        description="Path to a bundled copy, used when the remote host is unreachable.",
+    )
+    prefer_local: bool = Field(
+        default=False,
+        description="True when the provider found the remote image host unreachable.",
+    )
+
+    @property
+    def display_source(self) -> str:
+        """The path or URL the interface should actually render.
+
+        Falls back to the bundled file only when the provider established that the
+        remote host cannot be reached *and* a bundled copy exists, so a missing
+        fallback can never replace a working URL.
+        """
+        if self.prefer_local and self.local_path:
+            return self.local_path
+        return self.url
 
     @field_validator("url")
     @classmethod

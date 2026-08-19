@@ -22,6 +22,7 @@ LLMProvider = Literal["groq", "anthropic", "openai", "mock"]
 ToolProvider = Literal["live", "mock"]
 EmbeddingProvider = Literal["hashed", "openai"]
 FailureMode = Literal["none", "timeout", "server_error", "malformed", "rate_limit"]
+ImageFallbackMode = Literal["auto", "remote", "local"]
 VectorStoreBackend = Literal["faiss", "numpy"]
 CheckpointerKind = Literal["memory", "sqlite"]
 
@@ -78,6 +79,11 @@ class Settings(BaseSettings):
     weather_failure_mode: FailureMode = "server_error"
     force_image_failure: bool = False
     image_failure_mode: FailureMode = "server_error"
+
+    # Where gallery images come from. 'auto' probes Wikimedia once per process
+    # and uses the bundled copies in data/images/ when it cannot be reached, so a
+    # blocked or offline demo network still renders a complete gallery.
+    image_fallback_mode: ImageFallbackMode = "auto"
 
     # Per-attempt tool timeout and attempt budget.
     tool_timeout_seconds: float = 12.0
