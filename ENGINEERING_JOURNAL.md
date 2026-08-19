@@ -3,10 +3,10 @@
 A working record of how this project was built, written so I can explain any part
 of it out loud without re-reading the code.
 
-> **Status:** build steps 1-8 complete (environment, foundations, schemas,
+> **Status:** build steps 1-10 complete (environment, foundations, schemas,
 > services, seed corpus, vector store, layered router, tool layer, manual tool
-> executor). Graph assembly, UI and docs still to come. Sections marked
-> *(pending)* fill in as those land.
+> executor, graph assembly, parallel fan-out). The checkpointer, the UI and the
+> docs are still to come. Sections marked *(pending)* fill in as those land.
 
 ---
 
@@ -638,11 +638,19 @@ of those turns the screenshot that matters into a grid of broken-image icons.
 **The bug this uncovered, which is the interesting part.** The first version of
 the probe reported Commons as unreachable on a perfectly healthy network. The
 cause was not connectivity: Wikimedia's user-agent policy rejects generic library
-agents, so `python-httpx/0.28.1` was getting **HTTP 403**. That is the worst class
-of failure for a fallback mechanism - a *false negative* that silently downgrades
-a working demo to placeholders while looking like it worked correctly. Sending a
-descriptive `User-Agent` fixed it, and the reason is written into the code next to
-the header so nobody removes it later.
+agents, so `python-httpx/0.28.1` was getting **HTTP 403**.
+
+The lesson is the one worth saying out loud: **a fallback that silently misfires
+is worse than no fallback at all, because it degrades a healthy demo while
+reporting success.** Without the fallback, a network problem would have been
+obvious - broken images, an obvious cause. With a misfiring fallback, the app
+looks like it is working perfectly and simply shows worse content than it should,
+and nothing anywhere says why. Every automatic degradation path needs to be
+tested in the *healthy* case as well as the broken one, because the failure mode
+of a safety net is that it catches you when you were not falling.
+
+Sending a descriptive `User-Agent` fixed it, and the reason is written into the
+code next to the header so nobody removes it later.
 
 **Attribution.** `data/images/ATTRIBUTION.md` credits every photograph with its
 photographer and licence, and the licences are varied - Public domain, CC BY 2.0,
@@ -762,24 +770,171 @@ Two details make it trustworthy rather than decorative:
   enforces it. A companion test asserts a deliberate violation *would* be caught,
   because a guard that cannot fail is not a guard.
 
-### 9.5 One thing that surprised me
+### 9.5 The test I deleted instead of the code I nearly wrote
 
-I wrote a test for the case where a provider returns tool arguments as a JSON
-string rather than an object, since that genuinely happens. It failed - but not in
-the code. `langchain-core` validates `tool_calls[].args` as a dictionary when the
-`AIMessage` is constructed, so a string simply cannot reach my node; it is
-normalised one layer below.
+This is the story I would most want to be asked about.
 
-The right response was to move the test rather than write defensive code for a
-case that cannot occur. The tool specs still accept the string form, because raw
-provider payloads can carry it before they become an `AIMessage`, and the test now
-documents exactly where that boundary sits. Dead defensive code is a liability in
-an interview - you get asked what it protects against, and "nothing, actually" is
-a bad answer.
+Providers sometimes return tool arguments as a JSON *string* rather than a JSON
+object. I knew that, so I wrote a test asserting the executor handles it: build an
+`AIMessage` whose `tool_calls[0]["args"]` is the string `'{"city": "Paris"}'`, run
+the node, expect a successful reply.
+
+The test failed - but not in my code. It failed while *constructing the input*.
+`langchain-core` validates `tool_calls[].args` as a dictionary when the
+`AIMessage` is built, so a string argument is rejected before my node is ever
+reached. The case I was defending against cannot occur at that layer.
+
+I had two options. Add a string-handling branch to the executor so the test
+passes, or accept what the failure was telling me: I had put the defence in the
+wrong place. The conversion genuinely does belong somewhere - raw provider
+payloads really do carry strings - but that somewhere is the provider adapter,
+*below* the point where an `AIMessage` exists. The tool specs already handle it
+there, and a test covers it there.
+
+So I deleted the premise rather than writing the code. What replaced it is a test
+that documents the boundary: one assertion that `AIMessage` rejects string args,
+one that the specs accept them a layer down, and a docstring saying why no
+defensive branch exists in between - so the next person does not "fix" the
+apparent gap.
+
+**Dead defensive code invites "what does this protect against?", and "nothing" is
+a bad answer.** It also costs real money over time: every unreachable branch is
+code that must be read, maintained and tested, and it quietly teaches whoever
+reads it next that the layer below cannot be trusted, which spreads.
 
 ---
 
-## 10. Requirement traceability *(in progress)*
+## 10. Steps 9 and 10 - Distinction 2: the parallel fan-out
+
+### 10.1 What a superstep is, in plain English
+
+LangGraph does not walk the graph one node at a time. It executes in **rounds**,
+called supersteps. Everything scheduled into the same round starts together, runs
+concurrently, and the next round does not begin until every node in the current
+one has finished.
+
+That last part is what makes a join node possible without writing any
+synchronisation code: `join` is simply the node after the round, so it cannot run
+until all three branches are done. No locks, no waiting, no counting how many
+branches have reported in.
+
+### 10.2 The mechanism: a conditional edge that returns a list
+
+An ordinary edge always leads to the same node. A **conditional edge** runs a
+function at execution time and goes wherever it names. The important detail,
+confirmed in the Phase 1 recon rather than assumed, is that the function may
+return a *list*:
+
+```python
+def route_and_fan_out(state) -> list[str]:
+    knowledge_branch = "web_search" if state["route"] == "web" else "retrieve_vector"
+    return [knowledge_branch, "execute_weather", "execute_images"]
+```
+
+Three names, one superstep, three concurrent nodes. The same function also makes
+the knowledge-routing choice, so a single edge expresses both requirements the
+assignment lists: the conditional route *and* the fan-out.
+
+### 10.3 Why not asyncio.gather inside one node
+
+This is the design question I expect to be asked, because `asyncio.gather` inside
+a single node would run the same work concurrently with less machinery.
+
+The reason is that **it would make the graph lie**. A gather-based version has one
+node where there should be three. `graph.png` - a required submission artifact -
+would show a straight line through a single "fetch everything" box, and a reviewer
+looking at the picture would have no way to see that anything runs in parallel.
+The parallelism would exist but be invisible, provable only by reading the node's
+body.
+
+There are three further practical consequences:
+
+* **Failure isolation becomes mine to write.** With separate nodes, one branch
+  failing is contained by the graph. Inside a gather I would be hand-rolling
+  `return_exceptions` handling and partial-state merging.
+* **The routing decision loses its home.** The knowledge branch is an XOR choice.
+  Expressed as edges it is a property of the topology; expressed inside a node it
+  becomes an `if` statement buried in application code.
+* **Per-node timing disappears.** LangGraph attributes work to nodes. One fat node
+  reports one duration, so the trace panel could not show which branch was slow.
+
+The trade-off I accepted: more nodes, and every state key those branches touch now
+*requires* a reducer. That is a real constraint, and section 10.4 is about it.
+
+### 10.4 Why the reducers are mandatory, not stylistic
+
+When two nodes in the same superstep write the same state key, LangGraph does not
+pick a winner - it raises `InvalidUpdateError: Can receive only one value per
+step`. A reducer is the function that says how to merge those writes, attached via
+`Annotated[...]`.
+
+So the reducers are not tidiness. **The fan-out is only legal because they
+exist.** Two tests pin this down: one builds a fan-out over an un-reduced key and
+asserts the graph refuses to run, and a control test adds the annotation to the
+identical topology and asserts it succeeds. If someone later "simplifies" the
+annotations away, those tests explain exactly what they broke.
+
+### 10.5 The measured result
+
+The claim is proved by the clock rather than asserted. `plan_tools` records a
+timestamp when it dispatches the fan-out; `join` compares two numbers:
+
+* **sequential-equivalent** - the sum of the branches' own durations, which is what
+  the same work would cost run one after another;
+* **parallel wall clock** - how long the superstep actually took.
+
+Measured on the mock providers at their configured latencies (weather ~900 ms,
+images ~1100 ms, search ~800 ms):
+
+| Query | Route | Sequential-equivalent | Parallel wall clock | Speed-up |
+|---|---|---|---|---|
+| Tell me about Tokyo | vector store | 1964 ms | 1157 ms | **1.70x** |
+| Tell me about Paris | vector store | 2056 ms | 1276 ms | **1.61x** |
+| Tell me about Kyoto | web search | 2865 ms | 1035 ms | **2.77x** |
+
+**Mean 2.03x, about 1.1 seconds saved per request.**
+
+Two things worth noticing. The web-search query gains most, because that path has
+three genuinely slow branches instead of two - the more independent work there is,
+the more the fan-out buys. And the vector-store path shows `retrieve_vector` at
+0 ms: reading the local index is effectively free, so on that path the fan-out is
+really weather against images, and the ceiling is the slower of the two.
+
+That is the honest way to state the result: **the speed-up is bounded by the
+slowest branch**, and the numbers above are what that bound looks like in
+practice. A test asserts the wall clock stays below the sum with a wide margin, so
+it fails if the fan-out ever silently serialises, without being flaky on a loaded
+machine.
+
+### 10.6 Making the diagram tell the truth
+
+LangGraph renders every conditional edge as an identical dashed arrow. Accurate,
+but ambiguous: the four arrows leaving `plan_tools` include two that are
+*alternatives* (vector store or web search, never both) and two that are
+*concurrent* (weather and images, always together). A reviewer cannot tell which
+is which, and that distinction is the entire point of this section.
+
+So the exporter labels the edges it recognises - `concurrent`, `knowledge: in
+store`, `knowledge: not in store` - and renders the labelled source. The
+annotation never invents structure: it edits only edges the compiled graph
+actually produced, and two tests keep it honest. One asserts the annotated diagram
+has exactly the same edge set as the raw generated one; the other asserts the
+committed `graph.mmd` still matches the compiled graph, so the artifact cannot
+drift away from the code it documents.
+
+### 10.7 Something that surprised me
+
+The mock providers were built with different latencies on purpose - 900 ms for
+weather, 1100 ms for images - and it turned out to matter more than expected. My
+first instinct had been to give both the same delay, which would have produced a
+tidy "2 seconds became 1 second, 2x". That number would have been *less*
+convincing, not more: identical branch times look staged, and they hide the fact
+that concurrent work is bounded by its slowest member. Different latencies produce
+an untidy 1.70x, and the untidiness is what makes it look like a measurement.
+
+---
+
+## 11. Requirement traceability *(in progress)*
 
 | Assignment requirement | Where it lives | One-line explanation |
 |---|---|---|
@@ -787,19 +942,19 @@ a bad answer.
 | Typed state | `src/travel_agent/schemas/state.py` | `TypedDict` with `Annotated` reducers on every concurrently-written key. |
 | Structured output object | `src/travel_agent/schemas/response.py` | `TravelResponse` with `city_summary`, `weather_forecast`, `image_urls`. |
 | Manual tool execution (Distinction 1) | `graph/nodes/tool_executor.py` | Hand-parses `tool_calls`, validates against the Pydantic schema, dispatches, and returns `ToolMessage` with matching ids and `status="error"` on failure. No prebuilt helpers - enforced by a test. |
-| Parallel fan-out (Distinction 2) | `graph/edges.py`, `graph/builder.py` | *(pending)* |
+| Parallel fan-out (Distinction 2) | `graph/edges.py::route_and_fan_out`, `graph/nodes/core.py::join` | A conditional edge returns a list of node names, so all branches run in one superstep. Measured mean speed-up 2.03x. |
 | Checkpointer + follow-up (Distinction 3) | `graph/builder.py`, `graph/nodes/classify_intent.py` | *(pending)* |
 | Conditional edge on knowledge availability | `services/router.py`, `graph/edges.py` | Layered decision: gazetteer, then centroid similarity against the threshold. *(edge wiring pending)* |
 | Web search path for unknown cities | `tools/search/{mock,live}.py` | Mock plus DuckDuckGo and Tavily implementations. |
 | Weather tool, 5-7 day forecast | `tools/weather/{mock,live}.py` | Climate-plausible mock; OpenWeatherMap live. |
 | Image retrieval | `tools/images/{mock,live}.py` | Verified Commons photographs; Unsplash live. |
 | Graceful degradation when a tool fails | `tools/registry.py`, `tools/retry.py` | `execute()` returns an error result rather than raising; retries are bounded. |
-| Streamlit UI with chart and gallery | `ui/app.py` | *(pending)* |
-| `graph.png` | repo root, `scripts/export_graph.py` | *(pending)* |
+| Streamlit UI with chart and gallery | `ui/app.py` | *(pending - step 13)* |
+| `graph.png` | repo root, `scripts/export_graph.py` | Generated from the compiled graph, labelled to distinguish XOR from concurrent edges, and committed so it exists offline. |
 
 ---
 
-## 11. Things I deliberately did not do *(running list)*
+## 12. Things I deliberately did not do *(running list)*
 
 * **No `sentence-transformers` by default** - the download and cold start are not
   worth it for a three-city corpus. The interface supports it.
@@ -814,4 +969,4 @@ a bad answer.
 
 ---
 
-## 12. Interview Q&A *(pending - written once the graph and UI land)*
+## 13. Interview Q&A *(pending - written once the UI lands)*

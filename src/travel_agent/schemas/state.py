@@ -31,7 +31,7 @@ from typing import Annotated, Any, TypedDict, TypeVar
 from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
 
-from travel_agent.schemas.intent import DateRange, Intent, RouteName
+from travel_agent.schemas.intent import DateRange, Intent, MatchReason, RouteName
 from travel_agent.schemas.knowledge import KnowledgeChunk
 from travel_agent.schemas.response import ImageAsset, TravelResponse, WeatherPayload
 from travel_agent.schemas.trace import ParallelMetrics, TokenUsage, ToolErrorRecord, TraceEvent
@@ -145,6 +145,14 @@ class TravelState(TypedDict, total=False):
     route_score: float | None
     route_threshold: float
     route_reason: str
+    route_match_reason: MatchReason
+    route_all_scores: dict[str, float]
+    matched_city: str | None
+
+    # Set when the fan-out is dispatched and read by the join node. The gap
+    # between the two is the superstep's wall-clock time, which is the measured
+    # half of the parallelism claim.
+    fanout_started_at: float
 
     # --- fan-out results (single writer each, reducer keeps prior turns) -----
     knowledge: Annotated[list[KnowledgeChunk] | None, replace_value]

@@ -189,11 +189,18 @@ class ToolRegistry:
                 )
 
             except Exception as exc:  # noqa: BLE001 - degradation is the whole point
-                logger.warning("tool %s failed: %s: %s", tool_name, type(exc).__name__, exc)
+                # asyncio.TimeoutError carries no message, so str(exc) is "". Left
+                # as-is the UI would render "weather unavailable: " with nothing
+                # after the colon, which reads as a rendering bug rather than a
+                # timeout. Every failure gets a human-readable description.
+                detail = str(exc).strip() or (
+                    f"{type(exc).__name__} after {self._settings.tool_timeout_seconds:.0f}s"
+                )
+                logger.warning("tool %s failed: %s: %s", tool_name, type(exc).__name__, detail)
                 return ToolResult(
                     tool=tool_name,
                     ok=False,
-                    error=str(exc)[:400],
+                    error=detail[:400],
                     error_type=type(exc).__name__,
                     duration_ms=timer.elapsed_ms,
                     attempts=attempts_made + 1,

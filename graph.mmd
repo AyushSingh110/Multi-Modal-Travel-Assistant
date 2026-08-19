@@ -1,0 +1,34 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	normalize_input(normalize_input)
+	classify_intent(classify_intent)
+	plan_tools(plan_tools)
+	retrieve_vector(retrieve_vector)
+	web_search(web_search)
+	execute_weather(execute_weather)
+	execute_images(execute_images)
+	join(join)
+	synthesize(synthesize)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> normalize_input;
+	classify_intent -.->|work needed| plan_tools;
+	classify_intent -.->|cached / clarify| synthesize;
+	execute_images --> join;
+	execute_weather --> join;
+	join --> synthesize;
+	normalize_input --> classify_intent;
+	plan_tools -.->|concurrent| execute_images;
+	plan_tools -.->|concurrent| execute_weather;
+	plan_tools -.->|knowledge: in store| retrieve_vector;
+	plan_tools -.->|knowledge: not in store| web_search;
+	retrieve_vector --> join;
+	web_search --> join;
+	synthesize --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
