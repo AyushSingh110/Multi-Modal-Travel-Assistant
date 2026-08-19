@@ -3,10 +3,10 @@
 A working record of how this project was built, written so I can explain any part
 of it out loud without re-reading the code.
 
-> **Status:** build steps 1-11 complete - all three distinction challenges are
-> implemented and tested. The Streamlit UI, the model-backed synthesizer and the
-> documentation are still to come. Sections marked *(pending)* fill in as those
-> land.
+> **Status:** the application is complete - all three distinction challenges,
+> the Streamlit interface and the model-backed synthesizer are implemented and
+> tested, and the live provider path has been verified end to end. The README,
+> the run book and the interview section are what remain.
 
 ---
 
@@ -509,6 +509,77 @@ with eight regression tests covering the phrasings a panel is likely to type.
 
 ---
 
+### 6.12 My stale threshold was rescued by the layer I added for reviewers
+
+**Symptom.** The first screenshot run showed the trace panel reporting "similarity
+0.207 against a threshold of **0.55**", with Tokyo marked as *not* above the
+threshold - yet the answer came from the vector store anyway and looked perfect.
+
+**Cause.** My own `.env` still carried the old 0.55 value from the plan, months
+of reasoning ago in project time. Every routing decision was being made by the
+gazetteer's exact-name layer, because no city can score 0.55 under the corrected
+scoring. The similarity path was completely dead.
+
+**Both halves of this matter, and they pull in opposite directions.**
+
+The defence-in-depth I added for reviewers ended up covering my own
+misconfiguration. That is the strongest possible argument for the layered router:
+a bare threshold would have sent *every* query to web search and the demo would
+have been visibly wrong. Layering meant the system stayed correct while one of
+its two mechanisms was disabled.
+
+It is also a warning, and the more useful half. **The redundancy masked a broken
+setting.** Nothing failed, nothing logged an error, and the app behaved exactly
+as intended - so the bug survived until I read the trace panel and noticed a
+number that should not have been there. Redundancy buys correctness at the price
+of silence, and silence is how misconfiguration persists.
+
+**Fix.** The threshold guard already existed; it was only writing to the log. It
+now renders as a banner on the page itself, so the next person cannot miss what I
+nearly missed. The sidebar slider also widens its range rather than raising when
+the configured value is out of bounds.
+
+### 6.13 My own failures cluster around assuming an operation applied
+
+Three separate bugs in this build share one root: I performed an operation, did
+not verify it landed, and carried on. A patch script that printed "patched" while
+matching nothing - twice, the second time in a script written to fix the first.
+A `mkdir` placed outside the `try` block that was supposed to make storage
+failures survivable. An edit whose anchor had silently moved because a linter had
+reformatted the file underneath it.
+
+The fix in each case was the same shape: assert the postcondition rather than
+trusting the operation. Patch scripts now exit non-zero when an anchor is
+missing, and verification is done on the artifact - the rendered diagram, the
+generated file - not on the exit code of the tool that produced it.
+
+---
+
+### 6.14 A real API failure arrived unannounced, and the banner held
+
+**Symptom.** During an automated screenshot run against the live provider, the
+Kyoto page rendered a red banner reading:
+
+    The request failed: APIConnectionError: Connection error.
+
+**Cause.** A genuine transient network failure between my machine and Groq,
+mid-capture. Not injected, not simulated - the real thing, and it also explains
+why that run took ten minutes: the retry policy was doing its job with backoff
+before finally giving up.
+
+**Why I am recording it as a finding rather than an annoyance.** Every failure
+path in this project up to that point had been exercised by *my own* injection
+switches: a simulated 500, a simulated timeout, a simulated 429. Those prove the
+handling works against the failures I imagined. This was the first time real
+infrastructure failed on its own, and the result was a clean banner, an intact
+page, and an app that still responded to the next request. The error handling
+works on real failures, not only on the ones I designed.
+
+It is the same lesson as section 13b from the other direction: I had tested my
+assumptions thoroughly, and reality supplied the confirmation for free.
+
+---
+
 ## 7. Hardening the router
 
 ### 7.1 Why layered, not a single threshold
@@ -962,6 +1033,12 @@ images ~1100 ms, search ~800 ms):
 
 **Mean 2.03x, about 1.1 seconds saved per request.**
 
+Those are the figures from one labelled run, and they are not a constant. The
+mock providers apply 15 percent latency jitter, so repeating the measurement
+gives a mean between roughly 1.9x and 2.1x, with individual queries ranging
+from about 1.6x to 2.8x. The shape is stable; the exact number is not, and I
+would quote it as "about 2x" rather than to two decimal places.
+
 Two things worth noticing. The web-search query gains most, because that path has
 three genuinely slow branches instead of two - the more independent work there is,
 the more the fan-out buys. And the vector-store path shows `retrieve_vector` at
@@ -1052,6 +1129,14 @@ that overstates the case. Three consecutive turn-1/turn-2 pairs:
 | 1093 ms | 1044 ms | 49 ms | 1082 ms |
 
 **Mean wall clock saved: ~296 ms. Mean provider work avoided: ~1184 ms.**
+
+Again, one run. Repeated, the wall-clock saving swings widely - between about
+50 ms and 450 ms - because it depends on how the skipped branches happened to
+overlap with the weather branch on the first turn. The work avoided is far
+steadier, at roughly 1.1 to 1.3 seconds, because it is a sum of real provider
+durations rather than a difference between two noisy wall clocks. That the
+stable number is the one measuring work, and the noisy one is the one measuring
+time, is itself the argument of this section.
 
 The gap between those two numbers is the interesting part, and it follows
 directly from Distinction 2. The skipped branches were running *concurrently*
@@ -1145,7 +1230,221 @@ the metadata that describes it.
 
 ---
 
-## 12. Requirement traceability *(in progress)*
+## 12. Step 13 - The interface, and the async bridge
+
+### 12.1 The problem the runner solves
+
+Streamlit re-executes the whole script on every interaction. The graph is async.
+The obvious bridge - `asyncio.run(app.ainvoke(...))` inside the script - builds a
+new event loop per rerun and tears it down immediately, which breaks two things:
+anything bound to a loop dies with it (the SQLite checkpointer holds an
+`aiosqlite` connection created on a specific loop), and every rerun re-pays the
+cost of constructing the loop, the providers and the graph.
+
+So: **one event loop, running forever on a dedicated daemon thread, created once
+per session.** Work is submitted with `run_coroutine_threadsafe` and waited on
+with a timeout. The loop outlives every rerun.
+
+### 12.2 The ownership trap
+
+The loop, the compiled graph and the database connection must share one lifetime,
+and the connection has to be created **on the loop that will later use it**.
+Caching the loop while creating the connection per rerun is the pairing that
+deadlocks: the connection belongs to a loop nobody is running, so the first
+`await` never returns and the UI hangs with no error at all.
+
+`AgentRuntime` owns all three, and `build_runtime` constructs them in that order.
+Streamlit caches the whole object or none of it. A test drives a SQLite turn
+followed by a follow-up specifically because a regression there would appear as a
+hang rather than as a failure.
+
+Sidebar toggles **mutate the runtime's live `Settings` object** instead of
+rebuilding it. Rebuilding would tear down the loop and the conversation history,
+so flipping "break the weather API" would silently reset the demo.
+
+### 12.3 What the trace panel is for
+
+It is the highest-leverage screen in the project. Without it a reviewer sees a
+summary, some photographs and a chart, and has no way to tell whether the facts
+came from the knowledge base or the web, whether anything ran concurrently, or
+what a follow-up skipped. With it, each of those is legible in seconds - and
+crucially it shows the *numbers*, not the verdicts:
+
+> Source: Internal knowledge base. Decided by exact name match on 'Tokyo'.
+> Similarity 0.207 against a threshold of 0.07.
+
+"Routed to the vector store" is a claim. That sentence is an explanation.
+
+The Memory tab states the follow-up saving in the honest terms from section 11.3 -
+work and API cost avoided, not wall clock - because a UI that overstates its own
+cleverness is worse than one that says nothing.
+
+---
+
+## 13. Step 12 - Structured output, grounding, and the live run
+
+### 13.1 What the model is and is not asked for
+
+The model writes prose. It is **not** asked for the forecast or the image URLs,
+even though both appear in the final object. Those are typed values the tools
+already returned, and asking a model to copy them back would create an
+opportunity to alter them for no benefit. The schema it fills in has two fields:
+`city_summary` and `highlights`.
+
+Validation is JSON mode plus this project's own Pydantic pass, not
+`with_structured_output`. Not every provider supports schema-constrained
+decoding, the ones that do implement it differently, and keeping the failure
+handling in code I can explain is worth more here than a framework helper.
+
+The repair path is: validate, and on failure hand the model its own error text
+once. If that also fails, assemble the response deterministically from the tool
+payloads. **The user never sees a validation error** - the worst case is a duller
+summary.
+
+### 13.2 Grounding matters more than prose quality
+
+The "Now tell me about Kyoto" bug produced a complete, confident, well-written
+answer about a city that does not exist. That is the canonical failure mode of
+these systems, and prose quality actively works against you: the better it reads,
+the more convincing the mistake.
+
+So the prompt gives the model the retrieved passages and instructs it to use
+nothing else; sparse context is flagged explicitly so the correct output becomes
+"there is limited information available" rather than fluent invention. A test
+runs the synthesizer with an empty corpus and asserts the summary says exactly
+that, and another asserts every sentence in the deterministic fallback appears
+verbatim in the source material.
+
+### 13.3 The live run, and what only a live provider could reveal
+
+One deliberate request against Groq, `openai/gpt-oss-120b`:
+
+```
+route          : vector (exact, score 0.207)
+tools executed : search_city_images, get_weather_forecast
+forecast points: 7
+images         : 4
+validated      : TravelResponse passed Pydantic validation
+tokens         : 2802 (1744 prompt + 1058 completion) across 2 calls
+parallel       : 2827 ms sequential-equivalent vs 1900 ms actual (1.49x)
+```
+
+The summary it wrote is grounded in the seeded corpus - Yamanote, Kabukicho,
+Toyosu, Suica and Pasmo, the Narita Express timing - and it correctly folded in
+the *tool's* weather payload ("24 to 31 C over the next week") rather than
+inventing a forecast.
+
+**But the first live run was different, and this is the point of doing it.** The
+model called only the weather tool. The image branch had nothing to execute and
+the gallery came back empty. My mock always requested both tools, so nothing in
+293 passing tests could have caught it.
+
+Strengthening the prompt did not fix it. What fixed it was accepting that the
+interface has a fixed contract - a summary, a gallery and a chart - and that
+whether the page needs photographs is not really the model's judgement call. The
+graph now completes a plan that omits a required tool, synthesising the missing
+call with sensible arguments and recording it in the trace as
+`tools_added_by_graph`.
+
+The trade-off, stated plainly: **the planner is now advisory for tool selection
+rather than authoritative.** That is the right split when the required set is
+known up front. If the tool set were open-ended it would be the wrong design, and
+the prompt would have to carry the weight instead.
+
+Two smaller things the live run exposed: the model emits Unicode the Windows
+cp1252 console cannot encode (U+202F, a narrow no-break space), which killed a
+script *after* its work had succeeded; and a later run hit a genuine
+`APIConnectionError` mid-capture, which the UI rendered as a clean banner with the
+app still usable. The second was an unplanned but welcome demonstration that the
+error handling works on real failures, not only simulated ones.
+
+---
+
+## 13b. My mocks were more obedient than reality
+
+This is the most valuable thing I learned building this project, so it gets its
+own section.
+
+### The finding
+
+At the point I ran the first live request against Groq, the suite was at 293
+passing tests. Every path was covered: routing both ways, the manual executor,
+the fan-out, the follow-up skip, graceful degradation, the UI. I had good reason
+to think the system worked.
+
+The live run returned a page with **no images at all**.
+
+The model - `openai/gpt-oss-120b`, offered both the weather tool and the image
+tool - had called only the weather tool. The image branch had nothing to execute,
+so it recorded a skip and moved on. Nothing failed. No test could have failed,
+because my `MockLLM` *always* requested both tools.
+
+That is the whole lesson in one sentence: **my mocks were more obedient than
+reality.** I wrote a mock that did what the system needed, then tested that the
+system worked when the model did what it needed. The 293 tests were structurally
+incapable of discovering a model that simply decided pictures were unnecessary.
+
+### Why prompt strengthening was the wrong fix
+
+My first instinct was to fix the prompt. I rewrote the planner instruction to say
+a complete answer always contains a summary, a gallery and a chart, and that
+omitting a tool leaves a visibly empty panel in the interface.
+
+The model called only the weather tool again.
+
+I could have escalated - stronger wording, few-shot examples, a reminder in the
+user turn. But that approach was wrong even when it looked like it might work,
+because **it makes a hard contract depend on persuasion.** The interface needs
+four image URLs to render its gallery. That requirement does not vary with
+temperature, model version, phrasing, or how the model happens to feel about a
+particular city. Encoding it in a prompt means encoding it in the one part of the
+system with no guarantees at all, and every future model upgrade re-rolls the
+dice.
+
+### The actual fix
+
+The UI has a fixed contract: a summary, a gallery and a chart. Because the
+required tool set is therefore known *before* the model is asked anything, the
+graph can check the plan against it. `_complete_plan` compares the tools the
+model requested with the tools it was offered, synthesises any that are missing
+with sensible arguments, and records what it added in the trace as
+`tools_added_by_graph`.
+
+The model still chooses the arguments. It still drives the routing. It simply no
+longer gets to decide whether the page needs its gallery.
+
+### The trade-off, stated plainly
+
+**The planner is now advisory for tool selection rather than authoritative.**
+
+That is the correct split *here*, because the required set is known in advance
+and is small. It would be the wrong design if the tool set were open-ended - if
+the agent could choose among fifty tools depending on the request, there would be
+no "required set" to complete a plan against, and the prompt would have to carry
+the weight after all. The design is right for this problem, not in general, and I
+would say so before defending it.
+
+It is also disclosed rather than hidden: the trace panel shows exactly which
+calls the graph added, so nobody reading the output mistakes the graph's decision
+for the model's.
+
+### The general lesson
+
+**Mocks verify your code against your assumptions, not against reality.** They
+are excellent at catching regressions in logic you have already understood, and
+useless at catching the thing you did not think of - because you wrote them, out
+of the same understanding that produced the bug.
+
+That is precisely why the live smoke run exists, and the honest criticism is that
+**it should have come earlier.** I built it as a final check before the demo. If
+I had run one live request straight after the manual executor landed, I would
+have found this on day one instead of after the UI was finished. On any future
+project of this shape I would put a single live call in the loop as soon as the
+tool protocol works, and keep everything else on mocks.
+
+---
+
+## 14. Requirement traceability
 
 | Assignment requirement | Where it lives | One-line explanation |
 |---|---|---|
@@ -1155,29 +1454,319 @@ the metadata that describes it.
 | Manual tool execution (Distinction 1) | `graph/nodes/tool_executor.py` | Hand-parses `tool_calls`, validates against the Pydantic schema, dispatches, and returns `ToolMessage` with matching ids and `status="error"` on failure. No prebuilt helpers - enforced by a test. |
 | Parallel fan-out (Distinction 2) | `graph/edges.py::route_and_fan_out`, `graph/nodes/core.py::join` | A conditional edge returns a list of node names, so all branches run in one superstep. Measured mean speed-up 2.03x. |
 | Checkpointer + follow-up (Distinction 3) | `graph/checkpointer.py`, `graph/edges.py::planned_branches` | MemorySaver by default, AsyncSqliteSaver when durable; a follow-up re-runs only the weather branch and records what it skipped. |
-| Conditional edge on knowledge availability | `services/router.py`, `graph/edges.py` | Layered decision: gazetteer, then centroid similarity against the threshold. *(edge wiring pending)* |
+| Conditional edge on knowledge availability | `services/router.py`, `graph/edges.py::route_and_fan_out` | Layered decision - gazetteer first, then centroid similarity against the threshold - wired as the second conditional edge. |
 | Web search path for unknown cities | `tools/search/{mock,live}.py` | Mock plus DuckDuckGo and Tavily implementations. |
 | Weather tool, 5-7 day forecast | `tools/weather/{mock,live}.py` | Climate-plausible mock; OpenWeatherMap live. |
 | Image retrieval | `tools/images/{mock,live}.py` | Verified Commons photographs; Unsplash live. |
 | Graceful degradation when a tool fails | `tools/registry.py`, `tools/retry.py` | `execute()` returns an error result rather than raising; retries are bounded. |
-| Streamlit UI with chart and gallery | `ui/app.py` | *(pending - step 13)* |
+| Streamlit UI with chart and gallery | `ui/app.py`, `ui/components/*` | Plotly forecast chart with min/max bands, image gallery, and a live agent-trace panel. |
 | `graph.png` | repo root, `scripts/export_graph.py` | Generated from the compiled graph, labelled to distinguish XOR from concurrent edges, and committed so it exists offline. |
 
 ---
 
-## 13. Things I deliberately did not do *(running list)*
+## 15. The full request lifecycle
 
-* **No `sentence-transformers` by default** - the download and cold start are not
-  worth it for a three-city corpus. The interface supports it.
-* **No `langchain-community`** - the LangChain 1.x package split makes it a
-  version-drift risk, and nothing here needs it.
-* **No `tenacity`** - a 30-line retry utility I can explain line by line is worth
-  more in an interview than a dependency, and it let me implement
-  `Retry-After` handling exactly the way Groq's rate limiting needs.
-* **No dollar-cost display** - Groq, OpenAI and Anthropic price differently. The
-  UI shows token counts and names the provider rather than printing a number that
-  would be wrong for two of the three.
+What happens between typing "Tell me about Kyoto" and pixels on screen. Kyoto is
+the interesting case because it is *not* in the knowledge base.
+
+1. **You press Send.** Streamlit re-runs the whole script. `ui/app.py` reads the
+   cached `AgentRuntime` - the event loop, the compiled graph and the database
+   connection built once for this session - rather than constructing anything.
+2. **The query is submitted to the loop.** `runtime.invoke` calls
+   `asyncio.run_coroutine_threadsafe(app.ainvoke(...), loop)` and waits with a
+   timeout. The UI thread blocks on a future; the graph runs on its own thread.
+3. **`normalize_input`** tidies the text, increments the turn counter, and clears
+   the per-turn observability keys by passing `None` to their reducers. Slots and
+   previous results are deliberately left alone.
+4. **`classify_intent`** extracts the city. The gazetteer finds no match for
+   "Kyoto", so the grammatical extractor takes over: the preposition in "about
+   Kyoto" names its object. No date language is present, so the window stays at
+   seven days from today. City changed, so the intent is `new_city`.
+5. **The first conditional edge** (`route_after_intent`) sees real work to do and
+   routes to `plan_tools`.
+6. **`plan_tools` decides where the facts come from.** The router tries the
+   gazetteer first - no match - then scores "Kyoto" against each city profile.
+   The best is 0.040 against Tokyo, below the 0.07 threshold, so the route is
+   `web`. The score, the threshold, the reason and every city's score go into
+   state for the trace panel.
+7. **The same node asks the model which tools to call**, offering the weather
+   tool, the image tool and - because the route is `web` - the web search tool.
+   The model replies with an `AIMessage` carrying a `tool_calls` payload.
+   `_complete_plan` checks nothing required is missing and adds it if so.
+8. **The second conditional edge** (`route_and_fan_out`) returns a *list*:
+   `["web_search", "execute_weather", "execute_images"]`. All three are scheduled
+   into one superstep and run concurrently.
+9. **Three branches execute at once.** Each tool branch is the same
+   `ManualToolExecutor` class with a different `handles` set: it reads
+   `messages[-1].tool_calls`, picks out the calls it owns, validates the arguments
+   against that tool's Pydantic schema, dispatches through the registry - which
+   applies the timeout, the bounded retry and the backoff - and appends a
+   `ToolMessage` carrying the matching `tool_call_id`. A failure becomes a
+   `ToolMessage` with `status="error"` rather than an exception.
+10. **`join` runs once all three have finished**, because that is what the next
+    superstep means. It compares the sum of the branch durations against the
+    superstep's wall clock and stores both numbers plus the ratio.
+11. **`synthesize`** builds a prompt containing only the passages actually in
+    state, asks the model for JSON, validates it against `SynthesisDraft`,
+    repairs once if that fails, and falls back to a deterministic summary if the
+    repair fails too. The forecast and image URLs are copied from the typed tool
+    payloads, never from the model.
+12. **The state is checkpointed** under the thread id, so the next turn can
+    resume from it.
+13. **The future completes** and the UI thread wakes with the final state.
+14. **The page renders** from the validated `TravelResponse`: heading, source
+    line, warnings, summary, highlights, gallery, Plotly chart, sources. The trace
+    panel renders from the same state - route, scores, tool timings, the parallel
+    measurement, what was skipped, the start-up checks.
+
+Measured end to end on mocks: about 1.0 to 1.3 seconds. On the live Groq path,
+about 5 seconds, dominated by the two model calls.
 
 ---
 
-## 14. Interview Q&A *(pending - written once the UI lands)*
+## 16. Things I deliberately did not do
+
+* **No `sentence-transformers` by default** - hundreds of megabytes of PyTorch and
+  a slow cold start for a three-city corpus. The interface supports it, and
+  `EMBEDDING_PROVIDER=openai` gives real semantic embeddings for anyone who wants
+  them.
+* **No `langchain-community`** - the LangChain 1.x package split makes it a
+  version-drift risk and nothing here needs it.
+* **No `tenacity`** - a 30-line retry utility I can explain line by line is worth
+  more than a dependency here, and it let me implement `Retry-After` handling
+  exactly the way Groq's rate limiting needs.
+* **No dollar-cost display** - the three supported providers price differently, so
+  the UI shows token counts and names the provider rather than printing a figure
+  that would be wrong for two of them.
+* **No streaming output** - it would improve the live experience materially, but it
+  complicates the structured-output contract, and a validated object was the
+  requirement.
+* **No authentication or multi-user isolation** - `thread_id` separates
+  conversations, but anyone can supply any thread id. That is correct for a local
+  demo and inadequate for anything deployed.
+* **No caching layer** - the obvious next optimisation, and deliberately left out
+  so the parallel and skip measurements reflect real work rather than cache hits.
+* **No live weather or image keys used in the demo** - the mocks are the default
+  because the assignment blesses them and because a demo that depends on a
+  reviewer's API keys is a demo that fails in the room. Both live providers are
+  implemented and are one env var away.
+
+---
+
+## 17. Interview questions and answers
+
+Twenty questions I expect, with the answers I would give.
+
+### Architecture
+
+**1. Why LangGraph rather than a plain chain?**
+Because this system makes decisions and does work concurrently, and a chain can
+express neither. Three things needed a graph: a conditional edge that picks the
+knowledge source at runtime; a fan-out where three branches run in one step and
+rejoin; and a follow-up turn that skips two of those branches entirely. In a
+chain, all three become `if` statements buried inside application code, invisible
+in any diagram. The trade-off is real - more machinery, and every state key
+written concurrently now needs a reducer - but the topology becomes the
+documentation.
+
+**2. What is a superstep?**
+LangGraph executes in rounds rather than one node at a time. Everything scheduled
+into the same round starts together, runs concurrently, and the next round does
+not begin until all of it finishes. That is why my `join` node needs no
+synchronisation code: it is simply the node after the round, so it cannot run
+early.
+
+**3. Why are the reducers mandatory rather than stylistic?**
+When two nodes in one superstep write the same state key, LangGraph does not pick
+a winner - it raises `InvalidUpdateError: Can receive only one value per step`. A
+reducer attached via `Annotated` tells it how to merge. So the fan-out is only
+legal because the reducers exist. I have two tests pinning that: one builds a
+fan-out over an un-reduced key and asserts it raises, and a control test adds the
+annotation to the identical topology and asserts it succeeds.
+
+**4. Walk me through your state design.**
+One `TypedDict` with about twenty keys in four groups: the conversation, the
+resolved slots, the routing decision, and observability. Keys written by
+concurrent branches carry reducers - `append_list` for the trace and errors,
+`merge_timings` for durations, `add_token_usage` for usage. Keys with a single
+writer per turn use `replace_value`, which exists so a follow-up turn does not
+wipe the previous turn's images. The accumulating reducers treat an explicit
+`None` as "reset", which is how each turn starts with a clean trace.
+
+### The three distinctions
+
+**5. Why not use `ToolNode`?**
+Beyond the assignment asking for it, writing the executor by hand bought three
+things. Per-tool error isolation: each call runs independently, so one dead tool
+becomes one error message while its siblings return data. Selective execution:
+one executor instance can be told to handle only some of the tool calls, which is
+what lets the weather and image branches share the same class while running
+concurrently in different nodes. And observability: every call emits a trace
+event with the tool, id, arguments, provider, attempts and duration. What I gave
+up is that I now own schema validation and id correctness - both silent failures
+if I get them wrong - which is why those are the most heavily tested parts.
+
+**6. Explain the tool-calling protocol.**
+Three parts. I advertise tools as JSON schemas generated from Pydantic models.
+The model replies not with prose but with a structured request: an id, a tool
+name, and arguments. I run the function and reply with a `ToolMessage` carrying
+the *exact* id from the request. The id matters because a model can request
+several tools at once and my replies come back in whatever order the tools
+finish - frequently not the request order, since they run concurrently. Get the
+id wrong and the model attributes the weather data to the image request and
+nothing raises. Omit a reply entirely and most providers reject the next request
+outright.
+
+**7. Why does `status="error"` matter?**
+If a tool fails and I return "error: connection timed out" as an ordinary result,
+the model reads that as the legitimate output and summarises "the weather is
+error: connection timed out". `ToolMessage.status="error"` tells it the call did
+not succeed, so it can work around the gap honestly. I found the field by
+introspecting the installed class during the Phase 1 recon rather than assuming
+the shape.
+
+**8. How does your parallelism actually work, and what bounds it?**
+A conditional edge returns a *list* of node names, which schedules them all into
+one superstep. Measured across three queries: 1.70x, 1.61x and 2.77x, mean
+**2.03x**, saving roughly 1.1 seconds per request. What bounds it is the slowest
+branch - concurrent work costs the maximum, not the sum. On the vector-store path
+the local index read is effectively free, so the fan-out is really weather
+against images and the ceiling is the slower of the two. The web path gains most
+because it has three genuinely slow branches.
+
+**9. Why not just `asyncio.gather` inside one node?**
+It would run the same work concurrently, but the graph would contain one node
+where three should be, and `graph.png` - a required artifact - would show a
+straight line. Parallelism a reviewer cannot see in the topology is parallelism
+they have to take on faith. It would also mean hand-rolling failure isolation and
+partial-state merging, and per-node timings would collapse into one number so the
+trace panel could not show which branch was slow.
+
+**10. What does the follow-up skip actually save?**
+Not much latency, and I would correct anyone who assumed otherwise. Measured over
+three turn-pairs: mean wall-clock saving **296 ms**, mean provider work avoided
+**1184 ms**. They diverge because the skipped branches previously ran
+*concurrently* with the weather branch, so removing them barely shortens the
+turn. The saving is an image-provider round-trip and a knowledge read that would
+have been discarded, plus the quota and money they cost. **Parallelism buys
+latency; skipping buys cost.** The second is what scales - at a thousand users,
+avoiding a redundant fetch on every follow-up matters far more than 300 ms.
+
+**11. How do I know you skip rather than re-run and discard?**
+Because `timings` is reset at the start of every turn, so its keys are a precise
+record of what executed *this* turn, and the test asserts `execute_images` and
+`retrieve_vector` are **absent** on turn two. A re-run-and-discard implementation
+would still have their keys. The graph also records `skipped_nodes` and
+`skipped_ms_saved` in state, and the UI displays them.
+
+**12. What is a checkpointer, and what does `thread_id` scope?**
+After every superstep LangGraph hands the state to the checkpointer, which files
+it under a thread id; a later turn on that id resumes from it. The typed state
+*is* the memory - there is no separate conversation store. `thread_id` scopes one
+conversation, and a test asserts two threads cannot see each other's cities.
+`MemorySaver` is the default and dies with the process; `CHECKPOINTER=sqlite`
+gives durability, proven by a test that closes the graph, the checkpointer and the
+connection, rebuilds from the file alone, and asserts the follow-up still resolves
+the city.
+
+### Retrieval and routing
+
+**13. How does routing decide, and where did 0.07 come from?**
+Layered. First the gazetteer: does this name, or an alias, match a city I hold
+documents for? That is a question about names and a lookup answers it exactly.
+Only if that fails does the similarity score decide - the query is embedded and
+compared against each city's profile vector. 0.07 came from measurement, not
+intuition: seeded cities score 0.102 to 0.207, unseeded ones 0.000 to 0.040, so
+the separation gap is 0.062 and 0.07 sits inside it. The seeder prints that
+matrix on every run.
+
+**14. Why layered rather than a bare threshold?**
+Because a bare threshold is one fragile gate. "NYC" is a city I hold nine
+documents about, and it is not a token in the corpus at all - it would fail on
+score alone. Layering also proved itself accidentally: my own `.env` carried a
+stale 0.55 threshold for a while, which no city can reach, and every request was
+being routed correctly by the gazetteer while the similarity path was dead. That
+is the argument for defence in depth and the warning about it in one incident -
+the redundancy kept the system correct and hid a broken setting until I read the
+trace panel.
+
+**15. How would you know if the router were wrong?**
+Three ways, in increasing rigour. The trace panel shows the score and threshold on
+every request, so a wrong decision is visible rather than silent. The start-up
+guard measures the separation and refuses to stay quiet if the threshold sits
+outside it. And `evals/queries.jsonl` holds twenty labelled queries - seeded
+cities, unseeded cities, aliases, no-city cases and the phrasings that caused real
+bugs - currently 20/20. That last one is what I would grow first: routing accuracy
+is an empirical question and deserves a number, not an opinion.
+
+**16. Why a hashed TF-IDF embedder rather than a real model?**
+Because the retrieval problem here is narrow - decide whether a query names one of
+three seeded cities - and that is lexical, not semantic. The alternative costs
+hundreds of megabytes of PyTorch or an API key, and the project promises to run
+with neither. The trade-off is real and I would state it unprompted: this embedder
+does not know "the French capital" means Paris. `EMBEDDING_PROVIDER=openai` swaps
+in real semantic embeddings without touching the store or the router.
+
+### Failure, operations and scale
+
+**17. What happens when the weather API dies?**
+The page still renders. The registry never raises - it returns a result object
+carrying either a payload or an error - so the executor turns the failure into a
+`ToolMessage` with `status="error"`, the other branches complete normally, and
+`synthesize` is told the forecast is unavailable so it says so rather than
+inventing one. The user sees a warning banner naming the actual failure. There is
+a sidebar toggle that breaks it on demand, in four different ways, so this can be
+demonstrated rather than described.
+
+**18. Why do you not retry a malformed response?**
+Because retrying only helps when a failure is transient. A timeout, a 500 and a
+429 are all worth another attempt. A malformed payload is not: the provider
+answered successfully with data I cannot parse, so the identical request produces
+the identical unusable response. Retrying it three times spends triple the user's
+time and triple the quota to fail the same way - and on a rate-limited free tier
+those wasted calls can push the next legitimate request over the limit. The
+decision lives in the exception hierarchy: `MalformedPayloadError` deliberately
+does not inherit from `RetryableError`.
+
+**19. Why Groq when the assignment named OpenAI and Anthropic?**
+Both named providers are fully implemented behind the same interface and covered
+by the same tests; switching is one line in `.env`. Groq is the demo driver for
+two practical reasons: the free-tier allowance on the others does not comfortably
+cover a day of iterative development plus a live demo, and Groq is fast enough
+that the parallel measurement is dominated by tool latency rather than model
+latency, which makes the number cleaner. It is also OpenAI-compatible and returns
+a genuine `tool_calls` payload, so the manual executor is exercised against the
+real protocol.
+
+**20. How would you scale this to a thousand users, and what breaks first?**
+The graph itself is stateless per request, so it scales horizontally - but three
+things break in order. First, `MemorySaver`: it is per-process, so any load
+balancing loses conversations. That is a config change to the SQLite saver, or
+Postgres in production. Second, the vector store: it is loaded into each process,
+which is fine at 27 chunks and wrong at scale - that becomes a shared service.
+Third, provider rate limits, which is the real ceiling: at a thousand users the
+weather and image calls dominate, so I would add a shared cache keyed by city and
+day, which would serve most traffic without a provider call at all. The retrieval
+being in-process is the thing I would fix first, because it is the one that
+silently multiplies memory per worker.
+
+**21. What are the security concerns?**
+Four. Prompt injection through retrieved content - the web search path feeds
+third-party text into a model prompt, and while the current tools are read-only,
+that becomes serious the moment a tool can act. Key handling: keys live only in
+`.env`, which is gitignored, and never reach logs or the UI. Untrusted URLs: the
+image URLs are rendered in a browser, so the response schema validates that each
+is http(s) and drops anything else, and the curated set is a fixed allow-list.
+And resource exhaustion: every external call has a timeout and a bounded retry, so
+a hanging provider cannot pin a worker indefinitely.
+
+**22. What would you build next?**
+In order. A proper eval harness around the labelled query set, with the threshold
+swept rather than fixed. A shared cache keyed by city and day, since the same
+three cities dominate traffic and the data changes daily at most. Streaming the
+summary token by token, because five seconds of silence is the weakest part of the
+live experience. And LangSmith tracing, because my trace panel shows one request
+well and nothing about the hundred before it.
+
+---
+

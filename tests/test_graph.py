@@ -487,3 +487,95 @@ def test_intent_edge_skips_the_work_when_nothing_changed() -> None:
     assert edges.route_after_intent({"intent": "refine", "response": response}) == "synthesize"
     assert edges.route_after_intent({"intent": "clarify"}) == "synthesize"
     assert edges.route_after_intent({"intent": "new_city"}) == "plan_tools"
+
+
+# ================================================== plan completion (live) ====
+def test_plan_completion_adds_a_tool_the_model_omitted() -> None:
+    """Regression test for a divergence only a live provider exposed.
+
+    Asked about Tokyo with both tools offered, Groq's gpt-oss-120b called only the
+    weather tool and the gallery came back empty. The mock always called both, so
+    nothing caught it. The interface has a fixed contract - summary, gallery,
+    chart - so the graph completes a plan that is missing a required tool.
+    """
+    from travel_agent.graph.nodes.core import _complete_plan
+    from travel_agent.schemas.intent import DateRange
+    from travel_agent.schemas.tools import IMAGES_TOOL, WEATHER_TOOL
+
+    model_reply = AIMessage(
+        content="",
+        tool_calls=[
+            {"id": "call_1", "name": WEATHER_TOOL, "args": {"city": "Tokyo"}, "type": "tool_call"}
+        ],
+    )
+
+    completed, added = _complete_plan(
+        model_reply, [WEATHER_TOOL, IMAGES_TOOL], "Tokyo", DateRange()
+    )
+
+    assert added == [IMAGES_TOOL]
+    assert [call["name"] for call in completed.tool_calls] == [WEATHER_TOOL, IMAGES_TOOL]
+    assert completed.tool_calls[1]["args"]["city"] == "Tokyo"
+    assert completed.tool_calls[1]["id"] != completed.tool_calls[0]["id"], "ids must stay unique"
+
+
+def test_plan_completion_leaves_a_complete_plan_alone() -> None:
+    from travel_agent.graph.nodes.core import _complete_plan
+    from travel_agent.schemas.intent import DateRange
+    from travel_agent.schemas.tools import IMAGES_TOOL, WEATHER_TOOL
+
+    model_reply = AIMessage(
+        content="",
+        tool_calls=[
+            {"id": "a", "name": WEATHER_TOOL, "args": {"city": "Tokyo"}, "type": "tool_call"},
+            {"id": "b", "name": IMAGES_TOOL, "args": {"city": "Tokyo"}, "type": "tool_call"},
+        ],
+    )
+
+    completed, added = _complete_plan(
+        model_reply, [WEATHER_TOOL, IMAGES_TOOL], "Tokyo", DateRange()
+    )
+
+    assert added == []
+    assert completed is model_reply, "an untouched plan should not be rebuilt"
+
+
+def test_plan_completion_does_nothing_without_a_city() -> None:
+    """With no city there is nothing sensible to synthesise arguments from."""
+    from travel_agent.graph.nodes.core import _complete_plan
+    from travel_agent.schemas.intent import DateRange
+    from travel_agent.schemas.tools import WEATHER_TOOL
+
+    completed, added = _complete_plan(AIMessage(content=""), [WEATHER_TOOL], "", DateRange())
+
+    assert added == []
+    assert completed.tool_calls == []
+
+
+def test_plan_completion_passes_the_date_window_through() -> None:
+    from datetime import date as date_type
+
+    from travel_agent.graph.nodes.core import _complete_plan
+    from travel_agent.schemas.intent import DateRange
+    from travel_agent.schemas.tools import WEATHER_TOOL
+
+    window = DateRange(start=date_type(2026, 9, 1), days=5, label="next week")
+
+    completed, added = _complete_plan(AIMessage(content=""), [WEATHER_TOOL], "Tokyo", window)
+
+    assert added == [WEATHER_TOOL]
+    assert completed.tool_calls[0]["args"]["start_date"] == "2026-09-01"
+    assert completed.tool_calls[0]["args"]["days"] == 5
+
+
+async def test_the_graph_records_when_it_completed_a_plan() -> None:
+    """The trace must disclose that the graph added a call the model did not ask for."""
+    result = await _app().ainvoke(
+        {"user_query": "Tell me about Tokyo"}, config=_config("plan-completion")
+    )
+
+    plan_event = next(event for event in result["trace"] if event.node == "plan_tools")
+
+    assert "tools_added_by_graph" in plan_event.data
+    # The mock plans completely, so nothing should need adding here.
+    assert plan_event.data["tools_added_by_graph"] == []

@@ -22,12 +22,11 @@ import time
 from datetime import date, timedelta
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from travel_agent.graph import edges as graph_edges
 from travel_agent.logging_setup import Timer, get_logger
 from travel_agent.schemas.intent import DateRange, IntentDecision, RouteDecision
-from travel_agent.schemas.response import TravelResponse
 from travel_agent.schemas.state import TravelState, new_turn_updates
 from travel_agent.schemas.tools import (
     IMAGES_TOOL,
@@ -395,17 +394,25 @@ def make_plan_tools(llm: BaseLLM, router: KnowledgeRouter | None) -> Any:
                 SystemMessage(
                     content=(
                         "You are the planning step of a travel assistant. Decide which "
-                        "of the offered tools to call and with what arguments. Call every "
-                        "tool that is needed to answer fully, in one reply. Do not write "
-                        "prose."
+                        "of the offered tools to call, and call them all in one reply.\n\n"
+                        "A complete answer for this interface always contains three "
+                        "things: a written summary, a photo gallery and a weather chart. "
+                        "So call EVERY tool you are offered - if an image tool is "
+                        "offered, the gallery needs it; if a web search tool is offered, "
+                        "the summary needs it. Omitting one leaves a visibly empty panel "
+                        "in the interface.\n\n"
+                        "Reply with tool calls only. Do not write prose."
                     )
                 ),
                 HumanMessage(content=brief),
             ]
 
             call = await llm.plan(messages, schemas)
+            planned_message, added_tools = _complete_plan(
+                call.message, tool_names, city or "", date_range
+            )
 
-        requested = [entry.get("name") for entry in getattr(call.message, "tool_calls", [])]
+        requested = [entry.get("name") for entry in getattr(planned_message, "tool_calls", [])]
 
         # Which branches this turn will NOT run, and what that is worth. The
         # durations come from the last full turn, so the figure is a measurement
@@ -425,7 +432,7 @@ def make_plan_tools(llm: BaseLLM, router: KnowledgeRouter | None) -> Any:
         )
 
         return {
-            "messages": [call.message],
+            "messages": [planned_message],
             "route": decision.route,
             "route_score": decision.score,
             "route_threshold": decision.threshold,
@@ -455,6 +462,7 @@ def make_plan_tools(llm: BaseLLM, router: KnowledgeRouter | None) -> Any:
                         "all_scores": {k: round(v, 4) for k, v in decision.all_scores.items()},
                         "tools_offered": tool_names,
                         "tools_requested": requested,
+                        "tools_added_by_graph": added_tools,
                         "skipped_nodes": skipped,
                         "skipped_ms_saved": round(saved_ms, 1),
                     },
@@ -478,6 +486,79 @@ def make_plan_tools(llm: BaseLLM, router: KnowledgeRouter | None) -> Any:
         }
 
     return plan_tools
+
+
+def _complete_plan(
+    message: AIMessage,
+    offered: list[str],
+    city: str,
+    date_range: DateRange,
+) -> tuple[AIMessage, list[str]]:
+    """Add any offered tool the model failed to request.
+
+    WHY THIS EXISTS
+        A live run against Groq revealed a real divergence from the mock: asked
+        about Tokyo with both the weather and image tools offered, the model
+        called only the weather tool. The gallery came back empty. Strengthening
+        the prompt did not change it.
+
+        The interface has a fixed contract - a summary, a gallery and a chart -
+        so an answer missing its images is incomplete regardless of what the
+        planner decided. The model chooses *arguments* and *routing*; whether the
+        page needs pictures is not really its judgement call. So the graph fills
+        in what the planner omitted, records it in the trace, and carries on.
+
+        The trade-off, stated plainly: this makes the planner advisory for tool
+        *selection* rather than authoritative. That is the right split here
+        because the required set is known up front. If the tool set were open
+        ended, this would be the wrong design and the prompt would have to carry
+        the weight.
+
+    Args:
+        message: The model's reply, carrying whatever it asked for.
+        offered: Tool names that were advertised this turn.
+        city: The resolved city, used for the synthesised arguments.
+        date_range: The forecast window, used for the synthesised arguments.
+
+    Returns:
+        A tuple of the message to store and the names of any tools added.
+    """
+    existing = list(getattr(message, "tool_calls", []) or [])
+    requested = {entry.get("name") for entry in existing}
+    missing = [name for name in offered if name not in requested]
+
+    if not missing or not city:
+        return message, []
+
+    defaults: dict[str, dict[str, Any]] = {
+        WEATHER_TOOL: {
+            "city": city,
+            "days": date_range.days,
+            "start_date": date_range.start.isoformat(),
+        },
+        IMAGES_TOOL: {"city": city, "count": 4},
+        WEB_SEARCH_TOOL: {"query": f"{city} travel guide overview", "max_results": 4},
+    }
+
+    added: list[str] = []
+    for index, name in enumerate(missing):
+        if name not in defaults:
+            continue
+        existing.append(
+            {
+                "id": f"call_graph_{index:03d}",
+                "name": name,
+                "args": defaults[name],
+                "type": "tool_call",
+            }
+        )
+        added.append(name)
+
+    if not added:
+        return message, []
+
+    logger.info("plan completion: the model omitted %s; the graph added it", ", ".join(added))
+    return AIMessage(content=message.content, tool_calls=existing), added
 
 
 def _route(router: KnowledgeRouter | None, city: str | None) -> RouteDecision:
@@ -636,110 +717,6 @@ async def join(state: TravelState) -> dict[str, Any]:
 
 
 # =========================================================== synthesize =====
-async def synthesize(state: TravelState) -> dict[str, Any]:
-    """Assemble the validated response object.
-
-    Deliberately thin for now: it composes what the branches produced into a
-    :class:`TravelResponse` so the graph is end-to-end runnable. Step 12 replaces
-    the summary text with a model-written one and adds the validate-and-repair
-    pass; the contract this returns does not change.
-
-    Args:
-        state: Current graph state.
-
-    Returns:
-        A partial state update carrying the response object.
-    """
-    with Timer() as timer:
-        if state.get("intent") == "clarify":
-            return _clarify_response(state, timer)
-
-        city = state.get("city") or "Unknown"
-        knowledge = state.get("knowledge") or []
-        weather = state.get("weather")
-        images = state.get("images") or []
-        errors = state.get("errors") or []
-
-        if knowledge:
-            body = " ".join(chunk.text.split(". ", 1)[-1][:220].rstrip() for chunk in knowledge[:2])
-            summary = f"{city}. {body}"
-        else:
-            summary = (
-                f"{city} is the destination for this request, but no source material "
-                f"was retrieved for it on this turn."
-            )
-
-        warnings = [f"{error.tool} unavailable: {error.message[:120]}" for error in errors]
-
-        response = TravelResponse(
-            city=city,
-            city_summary=summary[:1800],
-            weather_forecast=list(weather.forecast) if weather else [],
-            image_urls=[asset.url for asset in images],
-            highlights=[chunk.section for chunk in knowledge[:4]],
-            knowledge_source="web_search" if state.get("route") == "web" else "vector_store",
-            sources=[chunk.source for chunk in knowledge if chunk.source][:6],
-            warnings=warnings,
-        )
-
-    return {
-        "response": response,
-        "timings": {"synthesize": timer.elapsed_ms},
-        "trace": [
-            TraceEvent(
-                node="synthesize",
-                kind="info",
-                message=(
-                    f"response built: {len(response.weather_forecast)} forecast points, "
-                    f"{len(response.image_urls)} images, {len(response.warnings)} warning(s)"
-                ),
-                duration_ms=timer.elapsed_ms,
-                data={"degraded": response.is_degraded},
-            )
-        ],
-    }
-
-
-def _clarify_response(state: TravelState, timer: Timer) -> dict[str, Any]:
-    """Build the response for a turn that named no city.
-
-    The guarded failure mode: a fresh thread asking "what about next week?" has no
-    city in memory and no city in the question. Guessing one would be worse than
-    asking - a confident answer about the wrong place is harder for a user to
-    detect than a question.
-
-    Args:
-        state: Current graph state.
-        timer: The synthesis timer, already running.
-
-    Returns:
-        A partial state update carrying a clarifying response.
-    """
-    query = state.get("user_query", "")
-    response = TravelResponse(
-        city="",
-        city_summary=(
-            "I could not tell which city you mean. This looks like a follow-up, but "
-            "there is no earlier city in this conversation to carry forward. Name a "
-            "city - for example 'Tell me about Tokyo' - and I will look it up."
-        ),
-        knowledge_source="memory",
-        warnings=["No city could be resolved from this turn or from the conversation history."],
-    )
-
-    return {
-        "response": response,
-        "timings": {"synthesize": timer.elapsed_ms},
-        "trace": [
-            TraceEvent(
-                node="synthesize",
-                kind="skip",
-                message="no city resolved - asked the user to clarify instead of guessing",
-                data={"query": query},
-            )
-        ],
-    }
-
 
 __all__ = [
     "FAN_OUT_NODES",
@@ -752,5 +729,4 @@ __all__ = [
     "make_plan_tools",
     "make_retrieve_vector",
     "normalize_input",
-    "synthesize",
 ]

@@ -1,0 +1,20 @@
+{"query": "Tell me about Tokyo", "expected_city": "Tokyo", "expected_route": "vector", "note": "seeded city, plain phrasing"}
+{"query": "Tell me about Paris", "expected_city": "Paris", "expected_route": "vector", "note": "seeded city"}
+{"query": "Tell me about New York", "expected_city": "New York", "expected_route": "vector", "note": "seeded city, two words"}
+{"query": "tell me about tokyo", "expected_city": "Tokyo", "expected_route": "vector", "note": "lowercase input"}
+{"query": "nyc please", "expected_city": "New York", "expected_route": "vector", "note": "alias, gazetteer layer"}
+{"query": "New York City", "expected_city": "New York", "expected_route": "vector", "note": "city suffix stripped"}
+{"query": "Tokyo, Japan", "expected_city": "Tokyo", "expected_route": "vector", "note": "country qualifier"}
+{"query": "how is the weather in Paris", "expected_city": "Paris", "expected_route": "vector", "note": "prepositional phrasing"}
+{"query": "Now tell me about Kyoto", "expected_city": "Kyoto", "expected_route": "web", "note": "REGRESSION: a leading capitalised filler word once resolved the city as 'Now' and produced a confident answer about a city that does not exist"}
+{"query": "Okay, tell me about Kyoto", "expected_city": "Kyoto", "expected_route": "web", "note": "REGRESSION: same class as 'Now' - leading filler"}
+{"query": "So what about Osaka", "expected_city": "Osaka", "expected_route": "web", "note": "REGRESSION: leading filler plus an unseeded city"}
+{"query": "Hey, tell me about Snohomish", "expected_city": "Snohomish", "expected_route": "web", "note": "REGRESSION: leading filler, the assignment's example unseeded city"}
+{"query": "Tell me about Kyoto", "expected_city": "Kyoto", "expected_route": "web", "note": "unseeded city that the corpus mentions once in the Tokyo day-trips passage"}
+{"query": "Tell me about Snohomish", "expected_city": "Snohomish", "expected_route": "web", "note": "unseeded city named by the assignment"}
+{"query": "I am visiting Osaka next week", "expected_city": "Osaka", "expected_route": "web", "note": "unseeded city, date language present"}
+{"query": "Should I go to Lisbon in March", "expected_city": "Lisbon", "expected_route": "web", "note": "unseeded city, prepositional"}
+{"query": "how is the weather in Reykjavik", "expected_city": "Reykjavik", "expected_route": "web", "note": "unseeded city, scores exactly 0.000"}
+{"query": "what about next week?", "expected_city": null, "expected_route": "clarify", "note": "no city and no history: must ask rather than guess"}
+{"query": "and the weekend?", "expected_city": null, "expected_route": "clarify", "note": "bare follow-up, no city"}
+{"query": "hello", "expected_city": null, "expected_route": "clarify", "note": "no city at all"}

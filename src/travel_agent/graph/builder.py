@@ -37,8 +37,8 @@ from travel_agent.graph.nodes.core import (
     make_plan_tools,
     make_retrieve_vector,
     normalize_input,
-    synthesize,
 )
+from travel_agent.graph.nodes.synthesize import make_synthesize
 from travel_agent.graph.nodes.tool_executor import make_tool_executor
 from travel_agent.logging_setup import get_logger
 from travel_agent.schemas.state import TravelState
@@ -148,7 +148,7 @@ def build_graph(
     )
 
     builder.add_node("join", join)
-    builder.add_node(edges.SYNTHESIZE, synthesize)
+    builder.add_node(edges.SYNTHESIZE, make_synthesize(deps.llm))
 
     # --- edges ---------------------------------------------------------------
     builder.add_edge(START, "normalize_input")
