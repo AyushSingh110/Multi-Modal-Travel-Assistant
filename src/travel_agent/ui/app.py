@@ -1,25 +1,26 @@
-"""Streamlit entry point.
-
-    streamlit run src/travel_agent/ui/app.py
-
-The script re-executes top to bottom on every interaction, which is why the
-runtime - event loop, compiled graph, database connection - is built once behind
-``st.cache_resource`` and never inside the flow of the page. See
-``travel_agent.ui.runner`` for why that matters.
-"""
+"""Streamlit entry point: streamlit run src/travel_agent/ui/app.py."""
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Any
 
-import streamlit as st
+# `streamlit run` runs this file as a plain script, so src/ is not on the import
+# path the way it is for pytest or for scripts/. Put it there before the first
+# travel_agent import, so the app runs from a clone with no install step.
+SRC_ROOT = Path(__file__).resolve().parents[2]
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
 
-from travel_agent.config.settings import Settings, get_settings
-from travel_agent.logging_setup import get_logger
-from travel_agent.ui.components.answer import render_answer
-from travel_agent.ui.components.sidebar import render_sidebar
-from travel_agent.ui.components.trace_panel import render_trace_panel
-from travel_agent.ui.runner import AgentRuntime, build_runtime
+import streamlit as st  # noqa: E402
+
+from travel_agent.config.settings import Settings, get_settings  # noqa: E402
+from travel_agent.logging_setup import get_logger  # noqa: E402
+from travel_agent.ui.components.answer import render_answer  # noqa: E402
+from travel_agent.ui.components.sidebar import render_sidebar  # noqa: E402
+from travel_agent.ui.components.trace_panel import render_trace_panel  # noqa: E402
+from travel_agent.ui.runner import AgentRuntime, build_runtime  # noqa: E402
 
 logger = get_logger(__name__)
 

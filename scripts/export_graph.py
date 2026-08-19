@@ -1,5 +1,7 @@
+"""Export the compiled graph to graph.png and graph.mmd."""
 
 from __future__ import annotations
+
 import argparse
 import sys
 from pathlib import Path
