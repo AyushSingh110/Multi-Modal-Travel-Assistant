@@ -218,7 +218,6 @@ SEARCH_PROVIDER=live       # DuckDuckGo needs no key; Tavily uses TAVILY_API_KEY
 Check one end to end with `python scripts/live_smoke_test.py`.
 
 ## Attribution
-
 Gallery photos come from Wikimedia Commons, credited with photographer and
 licence in [`data/images/ATTRIBUTION.md`](data/images/ATTRIBUTION.md), read from
 the Commons API rather than guessed. The `*.png` files in that folder are our own
